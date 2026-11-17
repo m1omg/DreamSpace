@@ -43,7 +43,7 @@ float linZ(float d){ float z = d*2.0 - 1.0; return 2.0*uNear*uFar/(uFar + uNear 
 float shaftPattern(vec2 p, float t){
   float a = sin(p.x*0.9 + t*0.7 + sin(p.y*0.6 - t*0.4)*1.6);
   float b = sin(p.y*1.1 - t*0.5 + sin(p.x*0.7 + t*0.3)*1.4);
-  return pow(max(a*b*0.5 + 0.5, 0.0), 5.0);
+  return pow(max(a*b*0.5 + 0.5, 0.0), 3.0);
 }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x + 0.03))/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
 
@@ -70,7 +70,7 @@ void main(){
         acc += shaftPattern(sp*0.55, uTime) * exp(-below*0.16) * exp(-t*0.07);
       }
       float toSun = pow(max(dot(dir, uSunDir), 0.0), 2.0);
-      col += vec3(0.55, 0.9, 0.8) * acc/7.0 * maxT * (0.012 + 0.03*toSun);
+      col += vec3(0.55, 0.9, 0.8) * acc/7.0 * maxT * (0.03 + 0.09*toSun);
     }
     col *= vec3(0.86, 1.0, 1.06);
   }

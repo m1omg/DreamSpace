@@ -24,7 +24,7 @@ void main(){
   vA = (age < 0.0 || age > aInfo.y) ? 0.0 : (1.0 - k*k);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
-  gl_PointSize = aInfo.z * uScale / max(-mv.z, 0.2) * (0.6 + 0.6*k);
+  gl_PointSize = min(aInfo.z * uScale / max(-mv.z, 0.6) * (0.6 + 0.6*k), uScale*0.045);
 }`,
     fragmentShader: /* glsl */ `
 varying float vA;
@@ -32,7 +32,7 @@ void main(){
   vec2 c = gl_PointCoord - 0.5; float d = dot(c, c);
   if (vA <= 0.0 || d > 0.25) discard;
   float a = smoothstep(0.25, 0.02, d) * vA;
-  gl_FragColor = vec4(vec3(2.2, 2.4, 2.5) * a, a * 0.75);
+  gl_FragColor = vec4(vec3(1.5, 1.65, 1.7) * a, a * 0.6);
 }`,
     transparent: true, depthWrite: false, blending: THREE.NormalBlending,
   });

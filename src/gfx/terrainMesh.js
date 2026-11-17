@@ -86,25 +86,30 @@ float terrBump(vec2 p, float rip){
   sand *= 0.9 + 0.2*vnoise(p*7.0);
   sand = mix(sand, vec3(0.95,0.9,0.78), (1.0 - smoothstep(-1.2,-0.1,h))*0.6);
   vec3 col = sand;
-  // mangrove mud
-  vec3 mud = mix(vec3(0.2,0.16,0.11), vec3(0.36,0.3,0.2), fbm(p*0.35));
-  mud = mix(mud, vec3(0.2,0.24,0.12), smoothstep(0.55,0.8,vnoise(p*0.9))*0.5);
-  col = mix(col, mud, clamp(vMask.x*(0.85 + 0.3*vnoise(p*0.6)),0.0,1.0));
-  // reef rock with encrusting colour
-  vec3 reef = mix(vec3(0.42,0.37,0.3), vec3(0.66,0.6,0.5), fbm(p*0.45));
-  float enc = smoothstep(0.62,0.8,vnoise(p*1.3 + 7.0));
-  reef = mix(reef, mix(vec3(0.75,0.35,0.5), vec3(0.4,0.3,0.65), vnoise(p*0.4)), enc*0.55);
-  col = mix(col, reef, vMask.y);
-  // lawns
-  float lawn = vMask.z * smoothstep(0.38,0.5, fbm(p*0.035 + 3.0));
-  vec3 grass = mix(vec3(0.16,0.36,0.09), vec3(0.32,0.5,0.15), fbm(p*0.3));
-  grass *= 0.8 + 0.4*vnoise(p*11.0);
-  col = mix(col, grass, lawn);
-  // desert and mountains
-  vec3 des = mix(vec3(0.84,0.69,0.48), vec3(0.72,0.54,0.38), fbm(p*0.012));
-  vec3 rock = mix(vec3(0.5,0.36,0.27), vec3(0.62,0.47,0.36), fbm(p*0.02 + 5.0));
-  des = mix(des, rock, smoothstep(14.0, 60.0, h) * (0.6 + 0.4*(1.0-vWN.y)));
-  col = mix(col, des, vMask.w);
+  // each zone only pays for its own noise
+  if (vMask.x > 0.004) {
+    vec3 mud = mix(vec3(0.2,0.16,0.11), vec3(0.36,0.3,0.2), fbm(p*0.35));
+    mud = mix(mud, vec3(0.2,0.24,0.12), smoothstep(0.55,0.8,vnoise(p*0.9))*0.5);
+    col = mix(col, mud, clamp(vMask.x*(0.85 + 0.3*vnoise(p*0.6)),0.0,1.0));
+  }
+  if (vMask.y > 0.004) {
+    vec3 reef = mix(vec3(0.42,0.37,0.3), vec3(0.66,0.6,0.5), fbm(p*0.45));
+    float enc = smoothstep(0.62,0.8,vnoise(p*1.3 + 7.0));
+    reef = mix(reef, mix(vec3(0.75,0.35,0.5), vec3(0.4,0.3,0.65), vnoise(p*0.4)), enc*0.55);
+    col = mix(col, reef, vMask.y);
+  }
+  if (vMask.z > 0.004) {
+    float lawn = vMask.z * smoothstep(0.38,0.5, fbm(p*0.035 + 3.0));
+    vec3 grass = mix(vec3(0.16,0.36,0.09), vec3(0.32,0.5,0.15), fbm(p*0.3));
+    grass *= 0.8 + 0.4*vnoise(p*11.0);
+    col = mix(col, grass, lawn);
+  }
+  if (vMask.w > 0.004) {
+    vec3 des = mix(vec3(0.84,0.69,0.48), vec3(0.72,0.54,0.38), fbm(p*0.012));
+    vec3 rock = mix(vec3(0.5,0.36,0.27), vec3(0.62,0.47,0.36), fbm(p*0.02 + 5.0));
+    des = mix(des, rock, smoothstep(14.0, 60.0, h) * (0.6 + 0.4*(1.0-vWN.y)));
+    col = mix(col, des, vMask.w);
+  }
   // wet sand at the water's edge
   float wetLine = 0.2 + 0.07*sin(uTime*0.55 + p.x*0.15) + 0.05*vnoise(p*0.8);
   float wet = (1.0 - smoothstep(0.0, wetLine, h)) * smoothstep(-0.6, -0.05, h);
@@ -124,6 +129,7 @@ float terrBump(vec2 p, float rip){
   vec2 p = vWPos.xz;
   float dist = length(vViewPosition);
   float amt = 1.0 / (1.0 + dist*dist*0.0006);
+  if (amt > 0.04) {
   float rip = (1.0 - smoothstep(-0.3, 0.15, vWPos.y)) * (1.0 - vMask.x) * (1.0 - vMask.y);
   float e = 0.06;
   float b0 = terrBump(p, rip);
@@ -131,6 +137,7 @@ float terrBump(vec2 p, float rip){
   float bz = terrBump(p + vec2(0.0,e), rip);
   vec3 g = vec3((bx-b0)/e, 0.0, (bz-b0)/e) * 0.085 * amt * (1.0 + vMask.x);
   normal = normalize(normal - (viewMatrix * vec4(g, 0.0)).xyz);
+  }
 }`);
     },
   });

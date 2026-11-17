@@ -61,7 +61,7 @@ float ripple(vec2 p, float t){
 }
 
 vec3 surfaceNormal(vec2 p, float dist){
-  vec2 g = (uIsPool > 0.5) ? vec2(0.0) : waveGrad(p, uTime);
+  vec2 g = (uIsPool > 0.5) ? vec2(0.0) : waveGrad(p, uTime) * (1.0 - smoothstep(60.0, 380.0, dist));
   float e = 0.12;
   float r0 = ripple(p, uTime), rx = ripple(p + vec2(e, 0.0), uTime), rz = ripple(p + vec2(0.0, e), uTime);
   float k = (uIsPool > 0.5 ? 0.05 : 0.085) / (1.0 + dist*0.03);
@@ -94,7 +94,10 @@ void main(){
     // reflection
     float cosT = max(dot(-V, N), 0.0);
     float F = 0.02 + 0.98*pow(1.0 - cosT, 5.0);
-    vec3 R = reflect(V, N); R.y = abs(R.y) + 0.02;
+    // far away the sea is rough at sub-pixel scale: it mirrors higher, bluer sky and less of it
+    float far = smoothstep(40.0, 600.0, dist);
+    F *= mix(1.0, 0.6, far);
+    vec3 R = reflect(V, N); R.y = abs(R.y) + 0.02 + 0.22*far;
     vec3 sky = textureCube(tSky, normalize(R)).rgb;
     float sd = max(dot(normalize(R), uSunDir), 0.0);
     float spec = pow(sd, 900.0)*45.0 + pow(sd, 90.0)*0.45;
@@ -150,7 +153,7 @@ function makeUniforms(pipeline, sky, pool) {
     uNear: pipeline.uNear,
     uFar: pipeline.uFar,
     uAbsorb: { value: pool ? new THREE.Vector3(0.22, 0.05, 0.03) : new THREE.Vector3(0.3, 0.052, 0.036) },
-    uScatter: { value: pool ? new THREE.Vector3(0.02, 0.3, 0.42) : new THREE.Vector3(0.0, 0.2, 0.3) },
+    uScatter: { value: pool ? new THREE.Vector3(0.02, 0.3, 0.42) : new THREE.Vector3(0.0, 0.17, 0.34) },
     uFogAir: { value: FOG_AIR.color },
     uFogWater: { value: FOG_WATER.color },
     uFogAirD: { value: FOG_AIR.density },

@@ -15,7 +15,7 @@ export const U = {
   uWind: { value: 1 },
 };
 
-export const FOG_AIR = { color: new THREE.Color(0.72, 0.84, 0.93), density: 0.00085 };
+export const FOG_AIR = { color: new THREE.Color(0.7, 0.88, 1.08), density: 0.00085 };
 export const FOG_WATER = { color: new THREE.Color(0.03, 0.34, 0.44), density: 0.042 };
 
 export const GLSL_NOISE = /* glsl */ `

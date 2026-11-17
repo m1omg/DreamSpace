@@ -67,7 +67,7 @@ const hud = createHud();
 const audio = createAudio();
 
 // ---- resolution -----------------------------------------------------------------------
-const maxRatio = quality === 'low' ? 1 : quality === 'high' ? 2 : 1.5;
+const maxRatio = quality === 'low' ? 1.3 : quality === 'high' ? 2 : 1.5;
 let renderScale = 1;
 function resize() {
   const pr = Math.min(devicePixelRatio || 1, maxRatio) * renderScale;

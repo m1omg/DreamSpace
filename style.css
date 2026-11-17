@@ -97,3 +97,11 @@ td { padding: 4px 14px; text-align: left; } td:last-child { text-align: right; f
   #hint { bottom: 96px; font-size: 12.5px; }
   #tPause { top: calc(max(14px, env(safe-area-inset-top)) + 130px); }
 }
+
+@media (max-height: 520px) {
+  .tr { width: 136px; height: 120px; }
+  #tPause { top: calc(max(14px, env(safe-area-inset-top)) + 130px); }
+  #hint { bottom: 84px; font-size: 12.5px; }
+  .speed-num { font-size: 22px; }
+  .toast { top: 16%; font-size: 15px; }
+}

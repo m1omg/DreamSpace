@@ -1,0 +1,11 @@
+{
+  "name": "dreamspace",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DreamSpace - a 3D browser game: a dream lagoon, mangroves, crocodiles and bunny hopping.",
+  "scripts": {
+    "test": "node tests/sim.test.mjs",
+    "start": "python3 -m http.server 8080"
+  }
+}

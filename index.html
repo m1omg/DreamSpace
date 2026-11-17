@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>DreamSpace – Sen o lagúne</title>
+<meta name="description" content="3D webová hra: plytká lagúna pri Červenom mori, mangrovy, krokodíly a bunnyhop zo sna.">
+<meta name="theme-color" content="#04222c">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230b6e7f'/%3E%3Ccircle cx='32' cy='30' r='12' fill='%23eaffff'/%3E%3Cpath d='M6 44q13-8 26 0t26 0v14H6z' fill='%2305323d'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.min.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud">
+  <div class="panel tl">
+    <div class="pearl-row"><span class="pearl-ico"></span><span id="pearls">0 / 12</span></div>
+    <div class="bar-row"><span class="lbl">Zdravie</span><div class="bar"><i id="hpFill" class="hp"></i></div></div>
+    <div class="bar-row" id="o2Row"><span class="lbl">Dych</span><div class="bar"><i id="o2Fill" class="o2"></i></div></div>
+    <div id="mode" class="mode"></div>
+  </div>
+  <canvas id="minimap" class="tr"></canvas>
+  <div id="dangerTxt">KROKODÍL ŤA LOVÍ – SKÁČ!</div>
+  <div class="speed">
+    <div id="combo" class="combo"></div>
+    <div class="speed-num"><span id="speedVal">0.0</span><small> m/s</small></div>
+    <div class="bar wide"><i id="speedFill"></i><b class="mark" title="rýchlosť krokodíla"></b></div>
+  </div>
+  <div id="toast" class="toast"></div>
+  <div id="hint"></div>
+  <div class="cross"></div>
+</div>
+
+<div id="touch">
+  <div id="tzone"></div>
+  <div id="stick"><i id="knob"></i></div>
+  <button id="tJump">HOP</button>
+  <button id="tDive">▼</button>
+  <button id="tPause">II</button>
+</div>
+
+<div id="menu" class="overlay on">
+  <div class="card">
+    <h1>DREAMSPACE</h1>
+    <h2>Sen o lagúne</h2>
+    <p id="story">Už druhú noc sa ti sníva to isté. Plávaš v plytkej lagúne pri rezorte na brehu Červeného mora.
+      Ďalej od pláže sa more zase splytčuje: bahno, mangrovy – a v nich morské krokodíly.
+      Plávať sa tam nedá. Ale v tomto sne vieš bunnyhopovať tak dobre, že na chvíľu letíš.</p>
+    <p class="goal">Nájdi <b>12 snových perál</b> a vráť sa s nimi na pláž.</p>
+    <div class="cols">
+      <div>
+        <h3>Ovládanie</h3>
+        <ul class="keys">
+          <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> pohyb · <kbd>myš</kbd> rozhľad</li>
+          <li><kbd>Medzerník</kbd> skok / hore vo vode</li>
+          <li><kbd>C</kbd> alebo <kbd>Ctrl</kbd> potopiť sa</li>
+          <li><kbd>Shift</kbd> šprint / rýchle plávanie</li>
+          <li><kbd>M</kbd> zvuk · <kbd>Esc</kbd> pauza</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Bunnyhop</h3>
+        <ul>
+          <li>V plytčine sa brodíš pomaly – <b>skáč</b>.</li>
+          <li>Drž medzerník: skáčeš ďalej sám a naberáš rýchlosť.</li>
+          <li>Pusť ho a stlač <b>tesne pred dopadom</b>: perfektný hop, ešte viac rýchlosti.</li>
+          <li>Vo vzduchu zatáčaj myšou + <kbd>A</kbd>/<kbd>D</kbd> (air strafe).</li>
+          <li>Pri veľkej rýchlosti drž medzerník vo vzduchu a <b>plachtíš</b>.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="opts">
+      <label>Kvalita
+        <select id="quality">
+          <option value="low">Nízka</option>
+          <option value="medium">Stredná</option>
+          <option value="high">Vysoká</option>
+        </select>
+      </label>
+      <label>Citlivosť myši <input id="sens" type="range" min="0.3" max="2.5" step="0.05" value="1"></label>
+    </div>
+    <button id="start" class="go">Zaspať</button>
+    <p class="fine" id="loadMsg">Načítavam sen…</p>
+  </div>
+</div>
+
+<div id="end" class="overlay">
+  <div class="card small">
+    <h1 id="endTitle">Zobudil si sa</h1>
+    <p id="endText"></p>
+    <table id="stats"></table>
+    <button id="again" class="go">Snívať ďalej</button>
+    <button id="restart" class="go ghost">Nový sen</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

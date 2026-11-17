@@ -1,12 +1,12 @@
 // DOM heads-up display and the minimap.
 
-import { terrainHeight, shoreZ, flatMask } from './sim/terrain.js';
-import { BUILDINGS, POOLS, HUTS } from './sim/mapdata.js';
+import { terrainHeight, shoreZ, flatMask, lagoonMask, poolOutline } from './sim/terrain.js';
+import { POOLS, HUTS } from './sim/mapdata.js';
 import { LAYOUT } from './sim/layout.js';
 
 const $ = (id) => document.getElementById(id);
 
-const MAP = { x0: -340, x1: 340, z0: -265, z1: 335, w: 204, h: 180 };
+const MAP = { x0: -460, x1: 460, z0: -265, z1: 505, w: 216, h: 180 };
 const mapX = (x) => (MAP.x1 - x) / (MAP.x1 - MAP.x0) * MAP.w; // +x is on the left when facing the sea
 const mapY = (z) => (MAP.z1 - z) / (MAP.z1 - MAP.z0) * MAP.h;
 
@@ -22,12 +22,12 @@ function drawMapBackground() {
       const y = terrainHeight(x, z), d = z - shoreZ(x);
       let r, gr, b;
       if (y > 0) {
-        if (d < -250) { r = 206; gr = 172; b = 122; }
-        else if (d < -44) { r = 150; gr = 176; b = 104; }
+        if (d < -262) { r = 206; gr = 172; b = 122; }
+        else if (d < -30) { r = 150; gr = 176; b = 104; }
         else { r = 236; gr = 216; b = 166; }
         if (d > 20) { r = 120; gr = 104; b = 70; }
       } else {
-        const F = d > 10 ? flatMask(x, d) : 0;
+        const F = d > 1 ? flatMask(x, d) * (1 - lagoonMask(x, d)) : 0;
         const t = Math.min(1, -y / 3.2);
         r = 96 - 80 * t; gr = 214 - 70 * t; b = 214 - 30 * t;
         if (y < -5) { const k = Math.min(1, (-y - 5) / 20); r = 16 - 8 * k; gr = 144 - 84 * k; b = 184 - 64 * k; }
@@ -40,16 +40,20 @@ function drawMapBackground() {
   g.putImageData(img, 0, 0);
   g.fillStyle = '#2f6b3a';
   for (const m of LAYOUT.mangroves) g.fillRect(mapX(m.x) - 1, mapY(m.z) - 1, 2, 2);
-  g.fillStyle = '#3aa8d8';
-  for (const p of POOLS) { g.beginPath(); g.ellipse(mapX(p.x), mapY(p.z), p.rx * MAP.w / 680, p.rz * MAP.h / 600, 0, 0, 6.283); g.fill(); }
-  g.fillStyle = '#c9895c';
-  for (const b of BUILDINGS) {
-    g.save(); g.translate(mapX(b.x), mapY(b.z)); g.rotate(b.rot);
-    const w = b.w * MAP.w / 680, h = b.d * MAP.h / 600;
-    g.fillRect(-w / 2, -h / 2, w, h); g.restore();
+  const sx = MAP.w / (MAP.x1 - MAP.x0), sz = MAP.h / (MAP.z1 - MAP.z0);
+  for (const p of POOLS) {
+    g.fillStyle = p.tint === 'green' ? '#5f9a4a' : '#3aa8d8';
+    g.beginPath();
+    poolOutline(p, 24).forEach(([x, z], i) => { if (i === 0) g.moveTo(mapX(x), mapY(z)); else g.lineTo(mapX(x), mapY(z)); });
+    g.closePath(); g.fill();
   }
-  g.fillStyle = '#8a6a3a';
-  for (const h of HUTS) { g.beginPath(); g.arc(mapX(h.x), mapY(h.z), 2, 0, 6.283); g.fill(); }
+  g.fillStyle = '#b8603c';
+  for (const b of LAYOUT.boxes) {
+    g.save(); g.translate(mapX(b.x), mapY(b.z)); g.rotate(b.rot);
+    g.fillRect(-b.hw * sx, -b.hd * sz, b.hw * 2 * sx, b.hd * 2 * sz); g.restore();
+  }
+  g.fillStyle = '#c9a25a';
+  for (const h of HUTS) { g.beginPath(); g.arc(mapX(h.x), mapY(h.z), Math.max(1.5, h.r * sx), 0, 6.283); g.fill(); }
   return cv;
 }
 
@@ -57,7 +61,7 @@ export function createHud() {
   const el = {
     hud: $('hud'), pearls: $('pearls'), hp: $('hpFill'), o2: $('o2Fill'), o2Row: $('o2Row'),
     speed: $('speedVal'), speedFill: $('speedFill'), combo: $('combo'), mode: $('mode'),
-    toast: $('toast'), hint: $('hint'), map: $('minimap'), danger: $('dangerTxt'),
+    toast: $('toast'), hint: $('hint'), map: $('minimap'), danger: $('dangerTxt'), poison: $('poisonTxt'),
   };
   const bg = drawMapBackground();
   const mctx = el.map.getContext('2d');
@@ -85,13 +89,14 @@ export function createHud() {
       set('o2low', el.o2Row, 'className', 'bar-row' + (p.o2 < 0.25 ? ' low' : ''));
       const sp = Math.hypot(p.vx, p.vz);
       set('sp', el.speed, 'textContent', sp.toFixed(1));
-      set('spf', el.speedFill.style, 'width', Math.min(100, sp / 20 * 100).toFixed(0) + '%');
-      set('spc', el.speedFill.style, 'background', sp > 13 ? '#7df9ff' : sp > 7.2 ? '#8dffb0' : '#ffd36b');
+      set('spf', el.speedFill.style, 'width', Math.min(100, sp / 30 * 100).toFixed(0) + '%');
+      set('spc', el.speedFill.style, 'background', sp > 16 ? '#7df9ff' : sp > 9.5 ? '#8dffb0' : '#ffd36b');
       const mode = p.mode === 'swim' ? (p.underwater ? 'Potápanie' : 'Plávanie')
-        : p.mode === 'air' ? (p.gliding > 0.5 ? 'Plachtenie' : 'Vo vzduchu')
+        : p.mode === 'air' ? (p.gliding > 0.5 ? `Plachtenie · ${Math.max(0, p.height).toFixed(1)} m` : 'Vo vzduchu')
           : p.depth > 0.12 ? 'Brodenie – skáč!' : 'Na súši';
       set('mode', el.mode, 'textContent', mode);
       set('danger', el.danger, 'className', game.chasing ? 'on' : '');
+      set('poison', el.poison, 'className', 'poison' + (p.poison > 0 ? ' on' : ''));
       if (toastT > 0) { toastT -= dt; if (toastT <= 0) el.toast.className = 'toast'; }
       if (comboT > 0) { comboT -= dt; if (comboT <= 0) el.combo.className = 'combo'; }
 

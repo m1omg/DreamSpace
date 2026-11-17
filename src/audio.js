@@ -80,6 +80,7 @@ export function createAudio() {
     lunge() { A.tone(95, 0.4, 0.28, 'sawtooth', 0, 0.5); A.burst(900, 0.5, 0.35, 0.3, 'bandpass', 0.4); },
     snap() { A.burst(2400, 1.5, 0.07, 0.4, 'highpass', 1); A.tone(160, 0.1, 0.25, 'square', 0, 0.5); },
     bite() { A.burst(300, 0.7, 0.4, 0.6, 'lowpass', 0.4); A.tone(60, 0.45, 0.45, 'sawtooth', 0, 0.5); },
+    sting() { A.tone(900, 0.25, 0.22, 'sawtooth', 0, 0.35); A.burst(3000, 2, 0.2, 0.25, 'bandpass', 0.5); },
     wake() { A.tone(440, 1.4, 0.12, 'sine', 0, 0.25); },
     win() { [523, 659, 784, 1047, 1319].forEach((f, i) => A.tone(f, 0.9, 0.1, 'triangle', i * 0.13)); },
     // continuous mix, called every frame

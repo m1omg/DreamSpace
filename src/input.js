@@ -1,30 +1,95 @@
-// Keyboard + mouse (pointer lock) and touch controls.
+// Keyboard + mouse (pointer lock) with rebindable controls, and touch.
 // Look angles change per input event, never per frame, so turning speed does
 // not depend on the frame rate either.
 
+export const ACTIONS = [
+  ['forward', 'Dopredu'], ['back', 'Dozadu'], ['left', 'Doľava'], ['right', 'Doprava'],
+  ['jump', 'Skok / nahor vo vode'], ['dive', 'Potopiť sa'], ['sprint', 'Šprint / rýchle plávanie'], ['mute', 'Zvuk'],
+];
+export const DEFAULT_BINDS = {
+  forward: ['KeyW', 'ArrowUp'], back: ['KeyS', 'ArrowDown'], left: ['KeyA', 'ArrowLeft'], right: ['KeyD', 'ArrowRight'],
+  jump: ['Space', 'Mouse2'], dive: ['KeyC', 'ControlLeft'], sprint: ['ShiftLeft', 'ShiftRight'], mute: ['KeyM', null],
+};
+
+const NAMES = {
+  Space: 'Medzerník', ShiftLeft: 'Ľ Shift', ShiftRight: 'P Shift', ControlLeft: 'Ľ Ctrl', ControlRight: 'P Ctrl',
+  AltLeft: 'Ľ Alt', AltRight: 'P Alt', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Tab: 'Tab',
+  Enter: 'Enter', Backquote: '`', CapsLock: 'Caps Lock',
+  Mouse0: 'Ľavé tl. myši', Mouse1: 'Koliesko (klik)', Mouse2: 'Pravé tl. myši', Mouse3: 'Myš 4', Mouse4: 'Myš 5',
+  WheelUp: 'Koliesko hore', WheelDown: 'Koliesko dole',
+};
+export function keyName(code) {
+  if (!code) return '—';
+  if (NAMES[code]) return NAMES[code];
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'Num ' + code.slice(6);
+  return code;
+}
+
 export function createInput(canvas, opts) {
-  const keys = new Set();
+  const down = new Set();
+  const pulse = { WheelUp: 0, WheelDown: 0 };
   const state = { mx: 0, mz: 0, jump: false, down: false, sprint: false, yaw: opts.yaw || 0, pitch: 0 };
-  const touch = { active: false, mx: 0, mz: 0, jump: false, down: false, sprint: false };
-  let sens = opts.sensitivity || 1;
-  let locked = false;
+  const touch = { mx: 0, mz: 0, jump: false, down: false, sprint: false };
+  let binds = JSON.parse(JSON.stringify(DEFAULT_BINDS));
+  if (opts.binds) for (const k in DEFAULT_BINDS) if (Array.isArray(opts.binds[k])) binds[k] = [opts.binds[k][0] || null, opts.binds[k][1] || null];
+  let sens = opts.sensitivity || 1, invertY = !!opts.invertY;
+  let locked = false, capture = null;
   const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+  // mouse buttons count whenever the game is running, even if the browser refused pointer lock
+  const playing = () => locked || (opts.active ? opts.active() : false);
 
   const look = (dx, dy, k) => {
     state.yaw -= dx * k;
-    state.pitch -= dy * k;
+    state.pitch -= dy * k * (invertY ? -1 : 1);
     const lim = Math.PI / 2 - 0.02;
     if (state.pitch > lim) state.pitch = lim; else if (state.pitch < -lim) state.pitch = -lim;
   };
+  const active = (action) => {
+    const b = binds[action];
+    for (let i = 0; i < 2; i++) {
+      const c = b[i];
+      if (c && (down.has(c) || pulse[c] > 0)) return true;
+    }
+    return false;
+  };
+  const press = (code) => {
+    down.add(code);
+    if (binds.mute.includes(code) && opts.onAction) opts.onAction('mute');
+  };
+
+  // while a binding is being captured, the next key / button / wheel goes to it
+  const finishCapture = (code) => {
+    const c = capture; capture = null;
+    if (code === 'Escape') { c.done(null, true); return; }
+    const value = (code === 'Backspace' || code === 'Delete') ? null : code;
+    if (value) for (const a in binds) for (let i = 0; i < 2; i++) if (binds[a][i] === value) binds[a][i] = null; // one job per key
+    binds[c.action][c.slot] = value;
+    c.done(value, false);
+    if (opts.onBindsChanged) opts.onBindsChanged(binds);
+  };
 
   addEventListener('keydown', (e) => {
+    if (capture) { e.preventDefault(); e.stopPropagation(); finishCapture(e.code); return; }
     if (e.repeat) return;
-    keys.add(e.code);
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code) && locked) e.preventDefault();
+    press(e.code);
+    if (locked && (e.code === 'Space' || e.code === 'Tab' || e.code.startsWith('Arrow') || e.code.startsWith('Alt') || e.code.startsWith('Control'))) e.preventDefault();
     if (opts.onKey) opts.onKey(e.code);
-  });
-  addEventListener('keyup', (e) => keys.delete(e.code));
-  addEventListener('blur', () => keys.clear());
+  }, true);
+  addEventListener('keyup', (e) => down.delete(e.code));
+  addEventListener('blur', () => down.clear());
+  addEventListener('mousedown', (e) => {
+    if (capture) { e.preventDefault(); e.stopPropagation(); finishCapture('Mouse' + e.button); return; }
+    if (playing()) { press('Mouse' + e.button); e.preventDefault(); }
+  }, true);
+  addEventListener('mouseup', (e) => down.delete('Mouse' + e.button));
+  addEventListener('contextmenu', (e) => { if (playing() || capture || e.target === canvas) e.preventDefault(); });
+  addEventListener('wheel', (e) => {
+    const code = e.deltaY < 0 ? 'WheelUp' : 'WheelDown';
+    if (capture) { e.preventDefault(); finishCapture(code); return; }
+    if (playing()) pulse[code] = 7; // held for a few simulation steps
+  }, { passive: false });
   document.addEventListener('mousemove', (e) => {
     if (!locked) return;
     // some browsers report a huge delta on the first event after locking
@@ -33,7 +98,7 @@ export function createInput(canvas, opts) {
   });
   document.addEventListener('pointerlockchange', () => {
     locked = document.pointerLockElement === canvas;
-    if (!locked) keys.clear();
+    if (!locked) down.clear();
     if (opts.onLock) opts.onLock(locked);
   });
 
@@ -88,20 +153,25 @@ export function createInput(canvas, opts) {
   return {
     state, isTouch,
     get locked() { return locked || isTouch; },
+    get binds() { return binds; },
+    get capturing() { return !!capture; },
     setSensitivity(v) { sens = v; },
+    setInvertY(v) { invertY = v; },
+    resetBinds() { binds = JSON.parse(JSON.stringify(DEFAULT_BINDS)); if (opts.onBindsChanged) opts.onBindsChanged(binds); },
+    // wait for the next key, mouse button or wheel tick and bind it
+    captureBind(action, slot, done) { capture = { action, slot, done }; },
+    label(action) { const b = binds[action]; return keyName(b[0] || b[1]); },
     lock() { if (!isTouch && canvas.requestPointerLock) { try { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* ignore */ } } },
     unlock() { if (document.pointerLockElement) document.exitPointerLock(); },
     // read the current input for one simulation step
     sample() {
-      let mx = 0, mz = 0;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) mz += 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) mz -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) mx += 1;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) mx -= 1;
-      state.mx = mx + touch.mx; state.mz = mz + touch.mz;
-      state.jump = keys.has('Space') || touch.jump;
-      state.down = keys.has('KeyC') || keys.has('ControlLeft') || keys.has('KeyQ') || touch.down;
-      state.sprint = keys.has('ShiftLeft') || keys.has('ShiftRight') || touch.sprint;
+      state.mx = (active('right') ? 1 : 0) - (active('left') ? 1 : 0) + touch.mx;
+      state.mz = (active('forward') ? 1 : 0) - (active('back') ? 1 : 0) + touch.mz;
+      state.jump = active('jump') || touch.jump;
+      state.down = active('dive') || touch.down;
+      state.sprint = active('sprint') || touch.sprint;
+      if (pulse.WheelUp > 0) pulse.WheelUp--;
+      if (pulse.WheelDown > 0) pulse.WheelDown--;
       return state;
     },
   };

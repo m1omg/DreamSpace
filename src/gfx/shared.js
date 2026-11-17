@@ -1,7 +1,8 @@
 // Shared uniforms, GLSL snippets and material patches.
 
 import * as THREE from 'three';
-import { WAVES, WAVE_AMP_LAGOON, WAVE_AMP_SEA } from '../sim/terrain.js';
+import { WAVES, WAVE_AMP_LAGOON, WAVE_AMP_SEA, flatMask, lagoonMask, openSea, shoreZ } from '../sim/terrain.js';
+import { mulberry32 } from '../sim/noise.js';
 
 export const LAYER_MAIN = 0;
 export const LAYER_FX = 1; // water + transparent effects, drawn after the opaque scene
@@ -50,11 +51,10 @@ export const GLSL_WAVES = (() => {
     gz += `  g.y += ${(w.amp * w.k * w.dz).toFixed(5)}*cos(${ph});\n`;
   });
   return /* glsl */ `
-float waveAmp(float z){ return ${WAVE_AMP_LAGOON.toFixed(4)} + ${WAVE_AMP_SEA.toFixed(4)}*smoothstep(225.0, 300.0, z); }
-float waveHeight(vec2 p, float t){ float h = 0.0;
-${h}  return h*waveAmp(p.y); }
-vec2 waveGrad(vec2 p, float t){ vec2 g = vec2(0.0);
-${gx}${gz}  return g*waveAmp(p.y); }
+float waveHeight(vec2 p, float t, float amp){ float h = 0.0;
+${h}  return h*amp; }
+vec2 waveGrad(vec2 p, float t, float amp){ vec2 g = vec2(0.0);
+${gx}${gz}  return g*amp; }
 `;
 })();
 
@@ -69,7 +69,7 @@ ${gx}${gz}  return g*waveAmp(p.y); }
 export function patchMaterial(mat, opts = {}) {
   const waterLevel = { value: opts.waterLevel ?? 0 };
   const key = ['uw', opts.sway || 0, opts.swayWater || 0, opts.key || '', opts.vertexPars || '', opts.vertex || '',
-    opts.fragmentPars || '', opts.color || ''].join('|');
+    opts.fragmentPars || '', opts.color || '', opts.bump || ''].join('|');
   mat.customProgramCacheKey = () => key;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = U.uTime;
@@ -79,9 +79,11 @@ export function patchMaterial(mat, opts = {}) {
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', `#include <common>
 varying vec3 vWPos;
+varying vec3 vObj;
 uniform float uTime;
 ${opts.vertexPars || ''}`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
+vObj = position;
 ${opts.sway ? `{
   #ifdef USE_INSTANCING
     vec3 ipos = instanceMatrix[3].xyz;
@@ -117,6 +119,7 @@ ${opts.vertex || ''}`)
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
 varying vec3 vWPos;
+varying vec3 vObj;
 uniform float uTime;
 uniform vec3 uSunDir;
 uniform float uWaterLevel;
@@ -125,6 +128,15 @@ ${GLSL_CAUSTICS}
 ${opts.fragmentPars || ''}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
 ${opts.color || ''}`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+${opts.bump ? `{
+  float bumpH; ${opts.bump}
+  vec3 bsx = dFdx(-vViewPosition), bsy = dFdy(-vViewPosition);
+  vec3 br1 = cross(bsy, normal), br2 = cross(normal, bsx);
+  float bdet = dot(bsx, br1);
+  vec3 bgrad = sign(bdet) * (dFdx(bumpH) * br1 + dFdy(bumpH) * br2);
+  normal = normalize(abs(bdet) * normal - bgrad);
+}` : ''}`)
       .replace('#include <opaque_fragment>', `{
   float dpt = uWaterLevel - vWPos.y;
   if (dpt > 0.0) {
@@ -175,4 +187,143 @@ export function canvasTexture(w, h, draw, opts = {}) {
   tex.generateMipmaps = true;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   return tex;
+}
+
+export const WAVE_AMP = { lagoon: WAVE_AMP_LAGOON, sea: WAVE_AMP_SEA };
+
+// ---- zone map: murky swamp water (R) and open-sea swell (G) -------------------
+export const ZONE = { x0: -640, x1: 640, z0: -60, z1: 580, w: 256, h: 128 };
+let zoneTex = null;
+export function zoneTexture() {
+  if (zoneTex) return zoneTex;
+  const { x0, x1, z0, z1, w, h } = ZONE;
+  const data = new Uint8Array(w * h * 4);
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+    const x = x0 + (i + 0.5) / w * (x1 - x0), z = z0 + (j + 0.5) / h * (z1 - z0);
+    const d = z - shoreZ(x);
+    const murk = d > 0 ? flatMask(x, d) * (1 - lagoonMask(x, d)) : 0;
+    const k = (j * w + i) * 4;
+    data[k] = Math.round(murk * 255); data[k + 1] = Math.round(openSea(x, z) * 255); data[k + 2] = 0; data[k + 3] = 255;
+  }
+  zoneTex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  zoneTex.magFilter = zoneTex.minFilter = THREE.LinearFilter;
+  zoneTex.needsUpdate = true;
+  return zoneTex;
+}
+export const GLSL_ZONE = /* glsl */ `
+uniform sampler2D tZone;
+vec2 zoneUV(vec2 p){ return vec2((p.x - (${ZONE.x0.toFixed(1)})) / ${(ZONE.x1 - ZONE.x0).toFixed(1)}, (p.y - (${ZONE.z0.toFixed(1)})) / ${(ZONE.z1 - ZONE.z0).toFixed(1)}); }
+`;
+
+// ---- procedural detail textures -------------------------------------------------
+// Tileable Voronoi cells: used for flagstones, stone cladding and reptile scales.
+function voronoi(size, n, seed, shade) {
+  const rnd = mulberry32(seed);
+  const pts = [];
+  for (let i = 0; i < n; i++) pts.push([rnd(), rnd(), rnd(), rnd()]);
+  return canvasTexture(size, size, (g) => {
+    const img = g.createImageData(size, size);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const u = x / size, v = y / size;
+      let d1 = 9, d2 = 9, id = 0;
+      for (let i = 0; i < n; i++) {
+        let dx = Math.abs(u - pts[i][0]), dy = Math.abs(v - pts[i][1]);
+        if (dx > 0.5) dx = 1 - dx;
+        if (dy > 0.5) dy = 1 - dy;
+        const dd = dx * dx + dy * dy;
+        if (dd < d1) { d2 = d1; d1 = dd; id = i; } else if (dd < d2) d2 = dd;
+      }
+      const edge = Math.sqrt(d2) - Math.sqrt(d1);
+      const c = shade(pts[id][2], pts[id][3], edge * Math.sqrt(n), Math.sqrt(d1) * Math.sqrt(n), rnd);
+      const k = (y * size + x) * 4;
+      img.data[k] = c[0]; img.data[k + 1] = c[1]; img.data[k + 2] = c[2]; img.data[k + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+  }, { repeat: true });
+}
+function speckle(g, w, h, rnd, n, lo, hi, size) {
+  for (let i = 0; i < n; i++) {
+    const v = lo + rnd() * (hi - lo);
+    g.fillStyle = `rgba(${v},${v},${v},${0.25 + rnd() * 0.4})`;
+    const s = size * (0.4 + rnd());
+    g.beginPath(); g.ellipse(rnd() * w, rnd() * h, s, s * (0.5 + rnd()), rnd() * 3.14, 0, 6.283); g.fill();
+  }
+}
+
+let detail = null;
+export function detailTextures() {
+  if (detail) return detail;
+  const sm = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  detail = {
+    // hand-trowelled plaster: soft blotches and fine grain, mid grey = neutral
+    stucco: canvasTexture(256, 256, (g, w, h) => {
+      const rnd = mulberry32(11);
+      g.fillStyle = '#c4c4c4'; g.fillRect(0, 0, w, h);
+      speckle(g, w, h, rnd, 260, 150, 235, 16);
+      speckle(g, w, h, rnd, 2600, 130, 250, 1.6);
+    }, { repeat: true }),
+    // crazy paving / flagstones
+    paving: voronoi(256, 34, 7, (a, b, edge) => {
+      const m = sm(0.02, 0.07, edge), t = 178 + a * 62;
+      return [t * m + 120 * (1 - m), (t - 8 - b * 14) * m + 106 * (1 - m), (t - 34 - b * 22) * m + 86 * (1 - m)];
+    }),
+    // rough stone cladding
+    stone: voronoi(256, 46, 23, (a, b, edge, c) => {
+      const m = sm(0.02, 0.09, edge), t = 150 + a * 80 - c * 14;
+      return [(t + 10) * m + 58 * (1 - m), (t - 6) * m + 50 * (1 - m), (t - 30 - b * 20) * m + 42 * (1 - m)];
+    }),
+    wood: canvasTexture(256, 256, (g, w, h) => {
+      const rnd = mulberry32(5);
+      g.fillStyle = '#b9b9b9'; g.fillRect(0, 0, w, h);
+      for (let i = 0; i < 150; i++) {
+        const v = 110 + rnd() * 130;
+        g.strokeStyle = `rgba(${v},${v},${v},0.55)`; g.lineWidth = 0.6 + rnd() * 2;
+        const x = rnd() * w;
+        g.beginPath(); g.moveTo(x, 0); g.bezierCurveTo(x + rnd() * 8 - 4, h * 0.3, x + rnd() * 8 - 4, h * 0.7, x, h); g.stroke();
+      }
+    }, { repeat: true }),
+    thatch: canvasTexture(256, 256, (g, w, h) => {
+      const rnd = mulberry32(9);
+      g.fillStyle = '#8f8f8f'; g.fillRect(0, 0, w, h);
+      for (let i = 0; i < 1500; i++) {
+        const v = 90 + rnd() * 165;
+        g.strokeStyle = `rgba(${v},${v * 0.97},${v * 0.9},0.7)`; g.lineWidth = 0.7 + rnd() * 1.4;
+        const x = rnd() * w, y = rnd() * h, l = 14 + rnd() * 30;
+        g.beginPath(); g.moveTo(x, y); g.lineTo(x + rnd() * 5 - 2.5, y + l); g.stroke();
+      }
+    }, { repeat: true }),
+    // reptile scales: keeled plates with dark seams
+    scales: voronoi(256, 90, 41, (a, b, edge, c) => {
+      const m = sm(0.02, 0.14, edge), k = 1 - Math.min(1, c * 1.1);
+      const t = (150 + a * 60 + k * 45) * m + 40 * (1 - m);
+      return [t, t, t];
+    }),
+    // date palm trunk: overlapping diamond leaf bases
+    palmBark: canvasTexture(128, 128, (g, w, h) => {
+      const rnd = mulberry32(3);
+      g.fillStyle = '#5a4a3a'; g.fillRect(0, 0, w, h);
+      for (let row = -1; row < 9; row++) for (let col = -1; col < 5; col++) {
+        const x = col * 32 + (row % 2 ? 16 : 0), y = row * 16;
+        const v = 120 + rnd() * 80;
+        const gr = g.createLinearGradient(0, y, 0, y + 26);
+        gr.addColorStop(0, `rgb(${v + 40},${v + 22},${v - 10})`); gr.addColorStop(1, `rgb(${v - 50},${v - 60},${v - 78})`);
+        g.fillStyle = gr;
+        g.beginPath(); g.moveTo(x, y); g.lineTo(x + 17, y + 12); g.lineTo(x, y + 27); g.lineTo(x - 17, y + 12); g.closePath(); g.fill();
+        g.strokeStyle = 'rgba(30,20,12,0.8)'; g.lineWidth = 1.5; g.stroke();
+      }
+    }, { repeat: true }),
+    // furrowed bark
+    bark: canvasTexture(128, 256, (g, w, h) => {
+      const rnd = mulberry32(13);
+      g.fillStyle = '#a79c8e'; g.fillRect(0, 0, w, h);
+      for (let i = 0; i < 220; i++) {
+        const v = 60 + rnd() * 150;
+        g.strokeStyle = `rgba(${v},${v * 0.93},${v * 0.84},0.6)`; g.lineWidth = 0.8 + rnd() * 2.6;
+        const x = rnd() * w, y = rnd() * h, l = 20 + rnd() * 70;
+        g.beginPath(); g.moveTo(x, y); g.bezierCurveTo(x + rnd() * 10 - 5, y + l * 0.3, x + rnd() * 10 - 5, y + l * 0.7, x + rnd() * 6 - 3, y + l); g.stroke();
+      }
+      speckle(g, w, h, rnd, 60, 140, 200, 6);
+    }, { repeat: true }),
+  };
+  return detail;
 }

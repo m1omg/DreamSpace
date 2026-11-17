@@ -2,7 +2,7 @@
 // the horizon, shaded procedurally (sand, wet sand, mud, reef rock, lawn, desert).
 
 import * as THREE from 'three';
-import { terrainHeight, shoreZ, flatMask, channelMask, poolAt } from '../sim/terrain.js';
+import { terrainHeight, shoreZ, flatMask, channelMask, lagoonMask, reefD, poolQ } from '../sim/terrain.js';
 import { POOLS } from '../sim/mapdata.js';
 import { smoothstep } from '../sim/noise.js';
 import { patchMaterial } from './shared.js';
@@ -19,17 +19,14 @@ function axis(lo, hi, step, farLo, farHi) {
 }
 
 function underPool(x, z) {
-  for (const p of POOLS) {
-    const dx = (x - p.x) / (p.rx + 3), dz = (z - p.z) / (p.rz + 3);
-    if (dx * dx + dz * dz < 1) return p;
-  }
+  for (const p of POOLS) if (poolQ(p, x, z, 3) < 1) return p;
   return null;
 }
 
 export function createTerrain(quality) {
   const step = quality === 'low' ? 3 : 2;
-  const xs = axis(-400, 400, step, -5200, 5200);
-  const zs = axis(-330, 344, step, -5200, 900);
+  const xs = axis(-480, 480, step, -5200, 5200);
+  const zs = axis(-330, 500, step, -5200, 1100);
   const nx = xs.length, nz = zs.length;
   const pos = new Float32Array(nx * nz * 3);
   const mask = new Float32Array(nx * nz * 4);
@@ -42,12 +39,16 @@ export function createTerrain(quality) {
       if (p) y = p.floor - 0.45; // hidden below the pool shell
       pos[k++] = x; pos[k++] = y; pos[k++] = z;
       const d = z - shoreZ(x);
-      const F = d > 10 ? flatMask(x, d) : 0;
+      const E = reefD(x);
+      const lag = d > 10 ? lagoonMask(x, d) : 0;
+      const F = d > 1 ? flatMask(x, d) * (1 - lag) : 0;
       const ch = d > 90 ? channelMask(x, d) : 0;
-      mask[m++] = F * (1 - 0.6 * ch);                                  // mud
-      mask[m++] = Math.max(smoothstep(226, 240, d), 0);                // reef rock
-      mask[m++] = smoothstep(-262, -246, d) * (1 - smoothstep(-52, -42, d)); // gardens
-      mask[m++] = smoothstep(250, 310, -d);                            // desert
+      // the outer reef flat and the lagoon rims are rock and coral rubble, not mud
+      const rock = Math.max(smoothstep(E - 16, E - 3, d), 0.6 * smoothstep(232, 290, d) * F, lag > 0.03 && lag < 0.75 ? 0.8 : 0);
+      mask[m++] = F * (1 - 0.6 * ch) * (1 - rock);                       // mud
+      mask[m++] = d > 12 ? rock : 0;                                      // reef rock
+      mask[m++] = smoothstep(-270, -254, d) * (1 - smoothstep(-34, -28, d)); // gardens
+      mask[m++] = smoothstep(258, 318, -d);                              // desert
     }
   }
   const idx = new Uint32Array((nx - 1) * (nz - 1) * 6);
@@ -100,8 +101,9 @@ float terrBump(vec2 p, float rip){
   }
   if (vMask.z > 0.004) {
     float lawn = vMask.z * smoothstep(0.38,0.5, fbm(p*0.035 + 3.0));
-    vec3 grass = mix(vec3(0.16,0.36,0.09), vec3(0.32,0.5,0.15), fbm(p*0.3));
-    grass *= 0.8 + 0.4*vnoise(p*11.0);
+    vec3 grass = mix(vec3(0.13,0.27,0.07), vec3(0.3,0.4,0.13), fbm(p*0.3));
+    grass = mix(grass, vec3(0.42,0.4,0.2), smoothstep(0.55, 0.8, fbm(p*0.09 + 11.0))*0.6);
+    grass *= 0.7 + 0.6*vnoise(p*13.0) * (0.7 + 0.6*vnoise(p*41.0));
     col = mix(col, grass, lawn);
   }
   if (vMask.w > 0.004) {

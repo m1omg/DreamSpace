@@ -4,24 +4,30 @@
 // window when the camera is below the surface.
 
 import * as THREE from 'three';
-import { U, GLSL_NOISE, GLSL_WAVES, LAYER_FX, FOG_AIR, FOG_WATER } from './shared.js';
+import { U, GLSL_NOISE, GLSL_WAVES, GLSL_ZONE, WAVE_AMP, zoneTexture, LAYER_FX, FOG_AIR, FOG_WATER } from './shared.js';
+import { poolOutline } from '../sim/terrain.js';
 import { POOLS } from '../sim/mapdata.js';
 
+const AMP = `(${WAVE_AMP.lagoon.toFixed(4)} + ${WAVE_AMP.sea.toFixed(4)}*`;
 const VERT = /* glsl */ `
 uniform float uTime;
 uniform vec2 uCenter;
 uniform float uIsPool;
 varying vec3 vWorld;
 varying float vViewZ;
+varying float vAmp;
 ${GLSL_WAVES}
+${GLSL_ZONE}
 void main(){
   vec3 p = position;
   vec4 wp;
+  vAmp = 0.0;
   if (uIsPool > 0.5) {
     wp = modelMatrix * vec4(p, 1.0);
   } else {
     wp = vec4(p.x + uCenter.x, 0.0, p.z + uCenter.y, 1.0);
-    wp.y = waveHeight(wp.xz, uTime);
+    vAmp = ${AMP}textureLod(tZone, zoneUV(wp.xz), 0.0).g);
+    wp.y = waveHeight(wp.xz, uTime, vAmp);
   }
   vWorld = wp.xyz;
   vec4 mv = viewMatrix * wp;
@@ -42,17 +48,10 @@ uniform vec3 uFogAir, uFogWater;
 uniform float uFogAirD, uFogWaterD;
 varying vec3 vWorld;
 varying float vViewZ;
+varying float vAmp;
 ${GLSL_NOISE}
 ${GLSL_WAVES}
-
-// same zone shape as flatMask() in the simulation
-float murkMask(vec2 p){
-  float d = p.y - (7.0*sin(p.x/110.0 + 0.4) + 3.0*sin(p.x/43.0 + 1.7));
-  float outer = 1.0 - smoothstep(232.0, 241.0, d);
-  float mainF = smoothstep(102.0, 116.0, d)*outer;
-  float sideF = smoothstep(240.0, 278.0, abs(p.x))*smoothstep(14.0, 30.0, d)*outer;
-  return max(mainF, sideF);
-}
+${GLSL_ZONE}
 
 float linZ(float d){ float z = d*2.0 - 1.0; return 2.0*uNear*uFar/(uFar + uNear - z*(uFar - uNear)); }
 
@@ -61,7 +60,7 @@ float ripple(vec2 p, float t){
 }
 
 vec3 surfaceNormal(vec2 p, float dist){
-  vec2 g = (uIsPool > 0.5) ? vec2(0.0) : waveGrad(p, uTime) * (1.0 - smoothstep(60.0, 380.0, dist));
+  vec2 g = (uIsPool > 0.5) ? vec2(0.0) : waveGrad(p, uTime, vAmp) * (1.0 - smoothstep(60.0, 380.0, dist));
   float e = 0.12;
   float r0 = ripple(p, uTime), rx = ripple(p + vec2(e, 0.0), uTime), rz = ripple(p + vec2(0.0, e), uTime);
   float k = (uIsPool > 0.5 ? 0.05 : 0.085) / (1.0 + dist*0.03);
@@ -87,7 +86,7 @@ void main(){
     vec3 refr = texture2D(tScene, suv + off).rgb;
     float path = min(thick2 * dist / max(vViewZ, 0.001), 400.0);
     float vdepth = path * max(-V.y, 0.0);
-    float murk = (uIsPool > 0.5) ? 0.0 : murkMask(vWorld.xz);
+    float murk = (uIsPool > 0.5) ? 0.0 : texture2D(tZone, zoneUV(vWorld.xz)).r;
     vec3 trans = exp(-path * mix(uAbsorb, vec3(0.75, 0.42, 0.62), murk));
     vec3 body = refr*trans + mix(uScatter * (1.0 - exp(-path*0.09)), vec3(0.075, 0.1, 0.035) * (1.0 - exp(-path*0.55)), murk);
 
@@ -110,8 +109,8 @@ void main(){
       float lap = 0.5 + 0.5*sin(vdepth*30.0 - uTime*1.7 + fn*5.0);
       float foam = shore*(0.4 + 0.6*lap)*smoothstep(0.35, 0.6, fn + shore*0.5);
       // breaking crests out on the reef
-      float crest = smoothstep(0.55, 1.0, waveHeight(vWorld.xz, uTime)/max(waveAmp(vWorld.z), 0.001))
-                    * smoothstep(0.12, 0.3, waveAmp(vWorld.z)) * smoothstep(0.5, 0.8, vnoise(vWorld.xz*0.8 + uTime*0.3));
+      float crest = smoothstep(0.55, 1.0, waveHeight(vWorld.xz, uTime, 1.0))
+                    * smoothstep(0.12, 0.3, vAmp) * smoothstep(0.5, 0.8, vnoise(vWorld.xz*0.8 + uTime*0.3));
       col = mix(col, vec3(1.0), clamp(foam*0.8 + crest*0.6, 0.0, 1.0));
     }
     float f = 1.0 - exp(-uFogAirD*uFogAirD*dist*dist);
@@ -149,6 +148,7 @@ function makeUniforms(pipeline, sky, pool) {
     tScene: pipeline.uScene,
     tDepth: pipeline.uDepth,
     tSky: { value: sky.cubeTexture },
+    tZone: { value: zoneTexture() },
     uRes: pipeline.uRes,
     uNear: pipeline.uNear,
     uFar: pipeline.uFar,
@@ -183,16 +183,22 @@ export function createWater(pipeline, sky, quality) {
   sea.renderOrder = 0;
   group.add(sea);
 
-  const poolMat = new THREE.ShaderMaterial({
-    vertexShader: VERT, fragmentShader: FRAG, uniforms: makeUniforms(pipeline, sky, true),
-    side: THREE.DoubleSide,
-  });
   for (const p of POOLS) {
-    const g = new THREE.CircleGeometry(1, 48);
+    const poolMat = new THREE.ShaderMaterial({
+      vertexShader: VERT, fragmentShader: FRAG, uniforms: makeUniforms(pipeline, sky, true),
+      side: THREE.DoubleSide,
+    });
+    if (p.tint === 'green') {
+      // the ornamental pond in the middle of the resort is green
+      poolMat.uniforms.uAbsorb.value.set(0.55, 0.16, 0.5);
+      poolMat.uniforms.uScatter.value.set(0.03, 0.2, 0.05);
+    }
+    const shape = new THREE.Shape();
+    poolOutline(p, 72).forEach(([x, z], i) => { if (i === 0) shape.moveTo(x, -z); else shape.lineTo(x, -z); });
+    const g = new THREE.ShapeGeometry(shape, 4);
     g.rotateX(-Math.PI / 2);
     const m = new THREE.Mesh(g, poolMat);
-    m.scale.set(p.rx, 1, p.rz);
-    m.position.set(p.x, p.level, p.z);
+    m.position.y = p.level;
     m.layers.set(LAYER_FX);
     group.add(m);
   }

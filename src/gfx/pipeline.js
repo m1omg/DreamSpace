@@ -23,7 +23,7 @@ void main(){ gl_FragColor = texture2D(tColor, vUv); gl_FragDepth = texture2D(tDe
 const FINAL = {
   uniforms: {
     tDiffuse: { value: null }, tDepth: { value: null },
-    uUnder: { value: 0 }, uTime: U.uTime, uDanger: { value: 0 }, uHurt: { value: 0 }, uSpeed: { value: 0 },
+    uUnder: { value: 0 }, uTime: U.uTime, uDanger: { value: 0 }, uHurt: { value: 0 }, uSpeed: { value: 0 }, uPoison: { value: 0 },
     uExposure: { value: 0.66 }, uFade: { value: 1 }, uRays: { value: 1 },
     uInvProj: { value: new THREE.Matrix4() }, uCamWorld: { value: new THREE.Matrix4() },
     uCamPos: { value: new THREE.Vector3() }, uSunDir: U.uSunDir,
@@ -34,7 +34,7 @@ const FINAL = {
   fragmentShader: /* glsl */ `
 precision highp float;
 uniform sampler2D tDiffuse; uniform sampler2D tDepth;
-uniform float uUnder, uTime, uDanger, uHurt, uSpeed, uExposure, uFade, uRays, uNear, uFar, uWaterY;
+uniform float uUnder, uTime, uDanger, uHurt, uSpeed, uPoison, uExposure, uFade, uRays, uNear, uFar, uWaterY;
 uniform mat4 uInvProj, uCamWorld; uniform vec3 uCamPos, uSunDir, uFogWater;
 varying vec2 vUv;
 
@@ -50,6 +50,8 @@ vec3 aces(vec3 x){ return clamp((x*(2.51*x + 0.03))/(x*(2.43*x + 0.59) + 0.14), 
 void main(){
   vec2 uv = vUv;
   if (uUnder > 0.5) uv += vec2(sin(uv.y*23.0 + uTime*1.7), cos(uv.x*19.0 + uTime*1.3))*0.0016;
+  // venom: the picture swims
+  uv += vec2(sin(uv.y*9.0 + uTime*2.3), cos(uv.x*7.0 + uTime*1.9))*0.006*uPoison;
   vec3 col = texture2D(tDiffuse, uv).rgb;
 
   if (uUnder > 0.5) {
@@ -95,6 +97,7 @@ void main(){
   float edge = smoothstep(0.08, 0.5, r2);
   col = mix(col, vec3(0.6, 0.02, 0.0), edge*uDanger*(0.3 + 0.12*sin(uTime*7.0)));
   col = mix(col, vec3(0.75, 0.0, 0.0), uHurt*(0.25 + 0.6*edge));
+  col = mix(col, col*vec3(0.75, 1.1, 0.6) + vec3(0.0, 0.05, 0.0), uPoison*(0.25 + 0.5*edge));
   col = pow(col, vec3(1.0/2.2));
   col *= uFade;
   col += (hash(gl_FragCoord.xy + uTime) - 0.5)/255.0;

@@ -8,6 +8,7 @@
 import { createPlayer, stepPlayer, respawnPlayer, eyeY } from './player.js';
 import { createCroc, stepCroc, resetCroc, CC } from './croc.js';
 import { LAYOUT } from './layout.js';
+import { createHazards, stepHazards, resetHazards } from './hazards.js';
 import { shoreZ } from './terrain.js';
 
 export const STEP = 1 / 120;
@@ -19,6 +20,7 @@ export function createGame() {
     player: createPlayer(),
     crocs: LAYOUT.crocs.map((h, i) => createCroc(h, i)),
     pearls: LAYOUT.pearls.map((p, i) => ({ ...p, index: i, taken: false })),
+    hazards: createHazards(),
     collected: 0, wakeups: 0, playTime: 0, won: false, allFound: false,
     events: [], danger: 0, chasing: 0,
     prev: null,
@@ -55,7 +57,7 @@ export function stepGame(g, input) {
     }
   }
   g.chasing = chasing;
-  const targetDanger = chasing ? Math.max(0.25, 1 - nearest / 40) : 0;
+  const targetDanger = chasing ? Math.max(0.25, 1 - nearest / 50) : 0;
   g.danger += (targetDanger - g.danger) * (1 - Math.exp(-3 * dt));
 
   // bites are applied here so the player module stays independent of crocs
@@ -65,18 +67,20 @@ export function stepGame(g, input) {
       e.applied = true;
       p.health -= CC.DAMAGE;
       p.invuln = 1.5; p.sinceHurt = 0;
-      p.vx = e.dirX * 7.5; p.vz = e.dirZ * 7.5;
+      p.vx = e.dirX * 8.5; p.vz = e.dirZ * 8.5;
       if (p.mode !== 'swim') { p.mode = 'air'; p.vy = 4.2; p.airTime = 0; p.flightDist = 0; p.landed = false; }
       p.combo = 0;
     }
   }
+
+  stepHazards(g.hazards, p, dt, g.time, ev);
 
   // pearls
   const ey = eyeY(p);
   for (const pearl of g.pearls) {
     if (pearl.taken) continue;
     const dx = pearl.x - p.x, dz = pearl.z - p.z;
-    if (dx * dx + dz * dz > 4.2) continue;
+    if (dx * dx + dz * dz > 5.8) continue;
     const dy = pearl.y - (p.feetY + 0.9);
     if (Math.abs(dy) > 1.7 && Math.abs(pearl.y - ey) > 1.2) continue;
     pearl.taken = true;
@@ -91,6 +95,7 @@ export function stepGame(g, input) {
     ev.push({ type: 'wake' });
     respawnPlayer(p);
     for (const c of g.crocs) resetCroc(c);
+    resetHazards(g.hazards);
   }
 
   // finish: all pearls and back on the dry beach
@@ -119,4 +124,4 @@ export function advance(g, realDt, sample) {
   return n;
 }
 
-export { LAYOUT };
+export { LAYOUT, resetHazards };

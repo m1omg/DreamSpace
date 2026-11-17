@@ -8,29 +8,39 @@ Plávať sa tam nedá, ale v tomto sne vieš bunnyhopovať tak dobre, že na chv
 
 ## Cieľ
 
-Nájdi 12 snových perál (svietia modrým lúčom a sú na minimape) a vráť sa s nimi na pláž.
+Nájdi 15 snových perál (svietia modrým lúčom a sú na minimape) a vráť sa s nimi na pláž.
 
 ## Ovládanie
+
+Všetky klávesy a tlačidlá myši sa dajú zmeniť v menu (Nastavenia a klávesy). Predvolené:
 
 | Vstup | Akcia |
 | --- | --- |
 | `W` `A` `S` `D` / šípky | pohyb |
 | myš | rozhľad |
-| `Medzerník` | skok, vo vode nahor |
-| `C` / `Ctrl` / `Q` | potopiť sa |
+| `Medzerník` / pravé tlačidlo myši | skok, vo vode nahor |
+| `C` / `Ctrl` | potopiť sa |
 | `Shift` | šprint / rýchle plávanie |
 | `M` | zvuk |
 | `Esc` | pauza |
 
-Na dotykových zariadeniach: ľavý palec pohyb, pravý rozhľad, tlačidlá HOP a ▼.
+Na skok sa dá naviazať aj koliesko myši. Na dotykových zariadeniach: ľavý palec pohyb, pravý rozhľad, tlačidlá HOP a ▼.
 
-### Bunnyhop
+### Bunnyhop a let
 
 - V plytčine sa brodíš pomaly, krokodíl je rýchlejší. Skáč.
-- Drž medzerník: po dopade skočíš znova a postupne naberáš rýchlosť.
+- Drž skok: po dopade skočíš znova a postupne naberáš rýchlosť.
 - Pusť ho a stlač tesne pred dopadom: perfektný hop bez straty rýchlosti a s väčším zrýchlením.
-- Vo vzduchu funguje air strafe (`A`/`D` + otáčanie myšou).
-- Nad cca 7,5 m/s drž medzerník vo vzduchu a plachtíš – tak preletíš aj hlboké kanály.
+- Vo vzduchu funguje air strafe (do strán + otáčanie myšou).
+- Nad cca 8 m/s drž skok vo vzduchu a plachtíš. Pohľad hore ťa zdvihne (za cenu rýchlosti),
+  pohľad dole rýchlosť vráti. Vyletíš nad mangrovy a dá sa pristáť aj na streche.
+
+### Nebezpečenstvá
+
+- **Krokodíly** v mangrovoch, kanáloch a pri okrajoch hlbokých lagún. Zbadajú ťa skôr, keď špliechaš.
+- **Trnuchy** (raje s modrými bodkami) ležia na dne tam, kde sa brodí. Stúpiš na ňu, bodne.
+- **Perutýny** (levie ryby) sa vznášajú pri koraloch a pomaly sa k plavcovi približujú.
+- Bodnutie uberie zdravie a jed ťa na pár sekúnd spomalí.
 
 ## Technika
 
@@ -41,9 +51,12 @@ Na dotykových zariadeniach: ľavý palec pohyb, pravý rozhľad, tlačidlá HOP
   že výsledok je bit po bite rovnaký.
 - Voda: lom scény s pohlcovaním svetla podľa hĺbky, odraz oblohy (Fresnel), pena pri brehu,
   kaustiky, pohľad spod hladiny so Snellovým oknom, svetelné lúče pod vodou.
-- Mapa: rozloženie rezortu vychádza z verejných popisov (asi 500 m pieskovej pláže, veľká plytká
-  lagúna chránená vonkajším útesom, tri bazény a detský bazén, plážové bary, nízke bloky izieb
-  s kupolami). Presné pôdorysy budov sú odhad, mangrovy a krokodíly sú zo sna.
+- Mapa je obkreslená zo satelitnej snímky rezortu: rovná pláž s troma radmi slnečníkov, skutočný
+  mangrovový porast na jej západnom konci, plytká lúka morskej trávy pred plážou, tri hlbšie lagúny
+  v útesovej plošine (malá západná, veľká stredná s tmavomodrým stredom, východná „Lagoon reef“),
+  vonkajší okraj útesu vybiehajúci asi 400 m od brehu; terakotové dvojpodlažné bloky s oblúkovými
+  lodžiami a kupolami, bazény voľného tvaru, okrúhla reštaurácia so slamenou strechou.
+  Zo sna je to, že útesová plošina je mangrovová plytčina s krokodílmi.
 
 ## Lokálne spustenie
 

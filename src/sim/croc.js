@@ -7,17 +7,17 @@
 // lunge -> fast straight dash; bites if it connects
 // rest  -> recovering after a lunge or a failed chase, then goes home
 
-import { groundAt, waterLevelAt, clamp, flatMask, shoreZ } from './terrain.js';
+import { groundAt, waterLevelAt, clamp, flatMask, shoreZ, reefD } from './terrain.js';
 import { resolveCollisions } from './layout.js';
 import { mulberry32 } from './noise.js';
 
 export const CC = {
-  SENSE: 27, SENSE_LOUD: 36, LEASH: 95, GIVE_UP: 60,
-  SPEED_SHALLOW: 6.9, SPEED_DEEP: 8.4, SPEED_LAND: 4.6, SPEED_IDLE: 0.9,
-  TURN: 2.1, ACCEL: 6.5,
-  LUNGE_RANGE: 5.6, LUNGE_SPEED: 14, LUNGE_TIME: 0.45, WINDUP: 0.38,
-  BITE_REACH: 1.15, BITE_HEIGHT: 1.05, DAMAGE: 34,
-  STAMINA: 13, RADIUS: 0.55, HEAD: 1.7,
+  SENSE: 31, SENSE_LOUD: 44, LEASH: 125, GIVE_UP: 78,
+  SPEED_SHALLOW: 9.2, SPEED_DEEP: 11, SPEED_LAND: 6, SPEED_IDLE: 0.9,
+  TURN: 2.3, ACCEL: 8.5,
+  LUNGE_RANGE: 7, LUNGE_SPEED: 18.5, LUNGE_TIME: 0.45, WINDUP: 0.36,
+  BITE_REACH: 1.2, BITE_HEIGHT: 1.6, DAMAGE: 34,
+  STAMINA: 14, RADIUS: 0.55, HEAD: 1.7,
 };
 
 export function createCroc(home, index) {
@@ -41,7 +41,7 @@ const pos = { x: 0, z: 0 }, vel = { x: 0, z: 0 };
 function inTerritory(x, z) {
   // crocodiles keep to the shallow flats and their channels
   const d = z - shoreZ(x);
-  return flatMask(x, d) > 0.35 || (d > 96 && d < 250);
+  return flatMask(x, d) > 0.35 || (d > 96 && d < reefD(x) + 6);
 }
 
 export function stepCroc(c, player, dt, time, events) {
@@ -58,7 +58,7 @@ export function stepCroc(c, player, dt, time, events) {
 
   switch (c.state) {
     case 'idle': {
-      const sense = playerSpeed > 3 ? CC.SENSE_LOUD : CC.SENSE;
+      const sense = playerSpeed > 3.6 ? CC.SENSE_LOUD : CC.SENSE;
       if (c.calm <= 0 && dist < sense && pInTerr && player.health > 0) {
         c.state = 'alert'; c.t = 0;
         events.push({ type: 'crocAlert', croc: c.index, x: c.x, z: c.z, dist });
@@ -113,7 +113,7 @@ export function stepCroc(c, player, dt, time, events) {
       if (c.t > CC.WINDUP) {
         c.state = 'lunge'; c.t = 0; c.bitten = false;
         // aim where the player will be in a moment
-        c.lungeYaw = Math.atan2(dx + player.vx * 0.22, dz + player.vz * 0.22);
+        c.lungeYaw = Math.atan2(dx + player.vx * 0.2, dz + player.vz * 0.2);
         c.yaw = c.lungeYaw;
         c.speed = CC.LUNGE_SPEED;
         events.push({ type: 'crocLunge', croc: c.index, x: c.x, z: c.z });
@@ -146,7 +146,7 @@ export function stepCroc(c, player, dt, time, events) {
       targetSpeed = 0;
       if (c.t > c.calm * 0.45 + 0.5) {
         // after a miss it may go again if the player is still close and it has breath left
-        if (c.calm < 2 && c.stamina > 2 && dist < 22 && pInTerr && player.health > 0) {
+        if (c.calm < 2 && c.stamina > 2 && dist < 28 && pInTerr && player.health > 0) {
           c.state = 'chase'; c.t = 0;
         } else {
           c.state = 'home'; c.t = 0; c.calm = Math.max(c.calm, 4);
@@ -182,7 +182,7 @@ export function stepCroc(c, player, dt, time, events) {
   }
   vel.x = Math.sin(c.yaw) * c.speed; vel.z = Math.cos(c.yaw) * c.speed;
   pos.x = c.x + vel.x * dt; pos.z = c.z + vel.z * dt;
-  resolveCollisions(pos, vel, CC.RADIUS, true);
+  resolveCollisions(pos, vel, CC.RADIUS, ground);
   // crocodiles do not climb out onto the resort beach
   const g2 = groundAt(pos.x, pos.z);
   if (g2 > 1.0) { pos.x = c.x; pos.z = c.z; c.speed *= 0.5; }

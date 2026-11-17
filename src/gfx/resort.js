@@ -1,235 +1,350 @@
-// The resort: Nubian-style low buildings with domes, pools with decks, beach
-// bars, umbrellas, sunbeds, promenade, buoy line and the warning sign.
+// The resort, modelled on the real one: serrated two-storey terracotta blocks
+// with arched loggias, turquoise railings and salmon domes; stone bungalows by
+// the beach; free-form pools in flagstone decks; the round thatched restaurant,
+// the hexagonal pavilion, beach bars, three rows of umbrellas.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { BUILDINGS, HUTS, POOLS } from '../sim/mapdata.js';
-import { LAYOUT } from '../sim/layout.js';
-import { terrainHeight, shoreZ } from '../sim/terrain.js';
-import { patchMaterial, paint, canvasTexture } from './shared.js';
+import { BUILDINGS, HUTS, POOLS, VOLLEYBALL } from '../sim/mapdata.js';
+import { LAYOUT, UNIT_W } from '../sim/layout.js';
+import { terrainHeight, shoreZ, poolOutline } from '../sim/terrain.js';
+import { patchMaterial, canvasTexture, detailTextures } from './shared.js';
+
+// material ids for the detail shader
+const M = { PLASTER: 0, STONE: 1, PAVING: 2, WOOD: 3, THATCH: 4, GLASS: 5, PAINT: 6, TILE: 7 };
 
 const C = {
-  plaster: new THREE.Color(0.9, 0.78, 0.6),
-  plaster2: new THREE.Color(0.86, 0.66, 0.46),
-  terracotta: new THREE.Color(0.7, 0.36, 0.22),
-  white: new THREE.Color(0.93, 0.91, 0.86),
-  wood: new THREE.Color(0.3, 0.19, 0.11),
-  glass: new THREE.Color(0.05, 0.1, 0.14),
-  door: new THREE.Color(0.06, 0.42, 0.47),
-  thatch: new THREE.Color(0.66, 0.52, 0.28),
-  stone: new THREE.Color(0.8, 0.72, 0.6),
-  tile: new THREE.Color(0.5, 0.8, 0.9),
-  cushion: new THREE.Color(0.15, 0.45, 0.7),
+  terra: new THREE.Color(0.8, 0.36, 0.22),
+  terra2: new THREE.Color(0.86, 0.42, 0.26),
+  terraDark: new THREE.Color(0.6, 0.27, 0.17),
+  dome: new THREE.Color(1.0, 0.62, 0.5),
+  cream: new THREE.Color(0.9, 0.82, 0.68),
+  white: new THREE.Color(0.93, 0.92, 0.88),
+  wood: new THREE.Color(0.42, 0.26, 0.14),
+  woodLight: new THREE.Color(0.62, 0.44, 0.26),
+  glass: new THREE.Color(0.05, 0.09, 0.12),
+  teal: new THREE.Color(0.05, 0.5, 0.52),
+  thatch: new THREE.Color(0.78, 0.63, 0.36),
+  thatchDark: new THREE.Color(0.55, 0.43, 0.24),
+  stone: new THREE.Color(0.86, 0.76, 0.6),
+  paving: new THREE.Color(0.95, 0.86, 0.68),
+  tile: new THREE.Color(0.42, 0.78, 0.92),
+  sand: new THREE.Color(0.9, 0.78, 0.55),
   red: new THREE.Color(0.85, 0.12, 0.08),
+  yellow: new THREE.Color(0.9, 0.72, 0.2),
+  lamp: new THREE.Color(0.15, 0.13, 0.12),
 };
 
-function prep(g, color) {
+function prep(g, color, mat) {
   const n = g.index ? g.toNonIndexed() : g;
   n.deleteAttribute('uv');
-  return paint(n, color);
+  const count = n.attributes.position.count;
+  const c = new Float32Array(count * 3), m = new Float32Array(count);
+  for (let i = 0; i < count; i++) { c[i * 3] = color.r; c[i * 3 + 1] = color.g; c[i * 3 + 2] = color.b; m[i] = mat; }
+  n.setAttribute('color', new THREE.BufferAttribute(c, 3));
+  n.setAttribute('aMat', new THREE.BufferAttribute(m, 1));
+  return n;
 }
-function box(w, h, d, color, x, y, z) {
+function box(w, h, d, color, mat, x, y, z, ry = 0) {
   const g = new THREE.BoxGeometry(w, h, d);
+  if (ry) g.rotateY(ry);
   g.translate(x, y + h / 2, z);
-  return prep(g, color);
+  return prep(g, color, mat);
 }
-function dome(r, color, x, y, z, squash = 1) {
-  const g = new THREE.SphereGeometry(r, 18, 9, 0, Math.PI * 2, 0, Math.PI / 2);
+function dome(r, color, x, y, z, squash = 1, seg = 22) {
+  const g = new THREE.SphereGeometry(r, seg, Math.round(seg / 2), 0, Math.PI * 2, 0, Math.PI / 2);
   g.scale(1, squash, 1);
   g.translate(x, y, z);
-  return prep(g, color);
+  return prep(g, color, M.PLASTER);
 }
-function cyl(rt, rb, h, color, x, y, z, seg = 12) {
-  const g = new THREE.CylinderGeometry(rt, rb, h, seg);
+function cyl(rt, rb, h, color, mat, x, y, z, seg = 14, open = false) {
+  const g = new THREE.CylinderGeometry(rt, rb, h, seg, 1, open);
   g.translate(x, y + h / 2, z);
-  return prep(g, color);
+  return prep(g, color, mat);
 }
-function place(parts, b, y0) {
-  const g = mergeGeometries(parts);
-  g.rotateY(b.rot || 0);
-  g.translate(b.x, y0, b.z);
-  return g;
+// A wall panel with an arched opening, standing in the xy plane.
+function archPanel(w, h, aw, spring, thick, color, mat = M.PLASTER) {
+  const s = new THREE.Shape();
+  s.moveTo(-w / 2, 0); s.lineTo(w / 2, 0); s.lineTo(w / 2, h); s.lineTo(-w / 2, h); s.closePath();
+  const hole = new THREE.Path();
+  hole.moveTo(-aw / 2, 0.001); hole.lineTo(-aw / 2, spring);
+  hole.absarc(0, spring, aw / 2, Math.PI, 0, true);
+  hole.lineTo(aw / 2, 0.001); hole.closePath();
+  s.holes.push(hole);
+  const g = new THREE.ExtrudeGeometry(s, { depth: thick, bevelEnabled: false, curveSegments: 9 });
+  g.translate(0, 0, -thick / 2);
+  return prep(g, color, mat);
+}
+function moved(g, x, y, z, ry = 0) {
+  const c = g.clone();
+  if (ry) c.rotateY(ry);
+  c.translate(x, y, z);
+  return c;
 }
 
-function roomBlock(b) {
-  // local frame: length along x
-  const along = b.w >= b.d;
-  const L = along ? b.w : b.d, D = along ? b.d : b.w, H = b.h;
+// ---- room unit: one bay of a two-storey block ----------------------------------
+function roomUnitGeometry() {
+  const W = UNIT_W, CORE = 7.0, LOG = 2.1, H = 6.9, F2 = 3.42;
   const parts = [];
-  const tone = (Math.abs(b.x) + Math.abs(b.z)) % 2 < 1 ? C.plaster : C.plaster2;
-  parts.push(box(L, H + 1.5, D, tone, 0, -1.5, 0));
-  parts.push(box(L + 0.3, 0.35, D + 0.3, C.terracotta, 0, H, 0));
-  parts.push(box(L + 0.1, 0.5, D + 0.1, C.terracotta, 0, 3.05, 0));
-  const bays = Math.floor(L / 4.6);
-  for (let i = 0; i < bays; i++) {
-    const x = -L / 2 + (i + 0.5) * (L / bays);
-    for (const side of [-1, 1]) {
-      const z = side * (D / 2 + 0.03);
-      for (const fy of [0.15, 3.65]) {
-        parts.push(box(1.5, 2.15, 0.08, C.glass, x - 0.7, fy, z));
-        parts.push(box(1.7, 0.12, 0.14, C.wood, x - 0.7, fy + 2.15, z));
-        parts.push(box(0.95, 2.15, 0.08, C.door, x + 1.0, fy, z));
-      }
-      // balcony
-      parts.push(box(L / bays - 0.5, 0.14, 1.3, C.white, x, 3.5, side * (D / 2 + 0.65)));
-      parts.push(box(L / bays - 0.5, 0.85, 0.07, C.white, x, 3.64, side * (D / 2 + 1.27)));
-      parts.push(box(0.2, 3.5, 0.2, C.white, x + (L / bays) / 2 - 0.25, 0, side * (D / 2 + 1.2)));
+  parts.push(box(W, H + 1.4, CORE, C.terra, M.PLASTER, 0, -1.4, 0));
+  // dome on a low drum
+  parts.push(cyl(1.75, 1.85, 0.32, C.terra2, M.PLASTER, 0, H, 0, 20));
+  parts.push(dome(1.68, C.dome, 0, H + 0.3, 0, 0.78));
+  const lower = archPanel(W, F2, 3.1, 1.25, 0.36, C.terra2);
+  const upper = archPanel(W, H - F2, 3.1, 1.2, 0.36, C.terra2);
+  for (const s of [-1, 1]) {
+    const zf = s * (CORE / 2 + LOG);
+    parts.push(moved(lower, 0, 0, zf - s * 0.18));
+    parts.push(moved(upper, 0, F2, zf - s * 0.18));
+    // loggia floors and the fin walls between neighbours
+    parts.push(box(W, 0.2, LOG, C.stone, M.PAVING, 0, -0.12, s * (CORE / 2 + LOG / 2)));
+    parts.push(box(W, 0.2, LOG, C.terraDark, M.PLASTER, 0, F2 - 0.2, s * (CORE / 2 + LOG / 2)));
+    for (const sx of [-1, 1]) parts.push(box(0.28, H + 1.4, LOG, C.terra, M.PLASTER, sx * (W / 2 - 0.14), -1.4, s * (CORE / 2 + LOG / 2)));
+    // stepped parapet
+    parts.push(box(W, 0.42, 0.4, C.terra2, M.PLASTER, 0, H, zf - s * 0.18));
+    for (const sx of [-1, 1]) parts.push(box(0.5, 0.36, 0.44, C.terra2, M.PLASTER, sx * (W / 2 - 0.25), H + 0.42, zf - s * 0.18));
+    // doors and windows on the recessed wall, both floors
+    for (const fy of [0.02, F2 + 0.02]) {
+      parts.push(box(1.05, 2.15, 0.07, C.wood, M.WOOD, -0.95, fy, s * (CORE / 2 + 0.03)));
+      parts.push(box(1.5, 1.35, 0.06, C.glass, M.GLASS, 0.75, fy + 0.8, s * (CORE / 2 + 0.03)));
+      parts.push(box(1.66, 0.09, 0.1, C.wood, M.WOOD, 0.75, fy + 2.15, s * (CORE / 2 + 0.03)));
+      parts.push(box(1.66, 0.09, 0.1, C.wood, M.WOOD, 0.75, fy + 0.72, s * (CORE / 2 + 0.03)));
     }
+    // turquoise railing upstairs
+    const rz = zf - s * 0.2;
+    parts.push(box(3.1, 0.07, 0.07, C.teal, M.PAINT, 0, F2 + 0.95, rz));
+    parts.push(box(3.1, 0.06, 0.06, C.teal, M.PAINT, 0, F2 + 0.12, rz));
+    for (let i = -5; i <= 5; i++) parts.push(box(0.045, 0.85, 0.045, C.teal, M.PAINT, i * 0.28, F2 + 0.12, rz));
   }
-  parts.push(dome(2.3, C.white, -L / 2 + 3.4, H + 0.3, 0));
-  parts.push(dome(2.3, C.white, L / 2 - 3.4, H + 0.3, 0));
-  parts.push(cyl(2.4, 2.4, 0.5, tone, -L / 2 + 3.4, H, 0, 18));
-  parts.push(cyl(2.4, 2.4, 0.5, tone, L / 2 - 3.4, H, 0, 18));
+  return mergeGeometries(parts);
+}
+
+// ---- bungalow unit: single-storey, stone-clad, salmon dome --------------------------
+function bungalowGeometry() {
+  const W = UNIT_W, D = 6.2, H = 3.3;
+  const parts = [];
+  parts.push(box(W, H + 1.2, D, C.stone, M.STONE, 0, -1.2, 0));
+  parts.push(box(W + 0.12, 0.28, D + 0.12, C.terra2, M.PLASTER, 0, H, 0));
+  parts.push(cyl(1.95, 2.0, 0.25, C.dome, M.PLASTER, 0, H + 0.28, 0, 20));
+  parts.push(dome(1.9, C.dome, 0, H + 0.5, 0, 0.72));
+  for (const s of [-1, 1]) {
+    const door = archPanel(1.5, 2.5, 1.05, 1.6, 0.14, C.terra2);
+    parts.push(moved(door, -0.8, 0, s * (D / 2 + 0.05)));
+    parts.push(box(1.0, 2.1, 0.06, C.wood, M.WOOD, -0.8, 0, s * (D / 2 + 0.02)));
+    parts.push(box(1.0, 1.0, 0.06, C.glass, M.GLASS, 1.0, 1.05, s * (D / 2 + 0.02)));
+    parts.push(box(1.16, 0.1, 0.1, C.wood, M.WOOD, 1.0, 0.98, s * (D / 2 + 0.03)));
+    parts.push(box(W, 0.14, 1.4, C.stone, M.PAVING, 0, -0.06, s * (D / 2 + 0.7)));
+  }
+  return mergeGeometries(parts);
+}
+
+// ---- single buildings ---------------------------------------------------------------
+function place(parts, b) {
   const g = mergeGeometries(parts);
-  if (!along) g.rotateY(Math.PI / 2);
   g.rotateY(b.rot || 0);
-  g.translate(b.x, terrainHeight(b.x, b.z), b.z);
+  g.translate(b.x, b.y ?? terrainHeight(b.x, b.z), b.z);
   return g;
 }
 
 function mainBuilding(b) {
   const parts = [];
   const { w: L, d: D, h: H } = b;
-  parts.push(box(L, H + 2, D, C.plaster, 0, -2, 0));
-  parts.push(box(L + 0.4, 0.45, D + 0.4, C.terracotta, 0, H, 0));
-  parts.push(box(26, H + 3.2, D + 4, C.plaster2, 0, 0, 0));
-  parts.push(box(26.4, 0.5, D + 4.4, C.terracotta, 0, H + 3.2, 0));
-  parts.push(cyl(8.4, 8.4, 1.6, C.white, 0, H + 3.2, 0, 24));
-  parts.push(dome(8.2, C.white, 0, H + 4.8, 0, 0.82));
-  parts.push(cyl(0.12, 0.12, 2.2, C.terracotta, 0, H + 11.4, 0, 6));
+  parts.push(box(L, H + 2, D, C.terra, M.PLASTER, 0, -2, 0));
+  parts.push(box(L + 0.5, 0.5, D + 0.5, C.terra2, M.PLASTER, 0, H, 0));
+  // raised centre with the big dome
+  parts.push(box(22, H + 3.4, D + 3, C.terra2, M.PLASTER, 0, 0, 0));
+  parts.push(box(22.5, 0.5, D + 3.5, C.terraDark, M.PLASTER, 0, H + 3.4, 0));
+  parts.push(cyl(7.2, 7.4, 1.5, C.terra2, M.PLASTER, 0, H + 3.4, 0, 28));
+  parts.push(dome(7.0, C.dome, 0, H + 4.9, 0, 0.8, 32));
+  parts.push(cyl(0.1, 0.1, 2.0, C.terraDark, M.PAINT, 0, H + 10.4, 0, 6));
   for (const sx of [-1, 1]) {
-    parts.push(box(7, H + 2.4, 7, C.plaster2, sx * (L / 2 - 3.5), 0, D / 2 - 2));
-    parts.push(dome(3.3, C.white, sx * (L / 2 - 3.5), H + 2.4, D / 2 - 2));
+    parts.push(box(6.5, H + 2.2, 6.5, C.terra2, M.PLASTER, sx * (L / 2 - 3.25), 0, D / 2 - 2));
+    parts.push(dome(3.0, C.dome, sx * (L / 2 - 3.25), H + 2.2, D / 2 - 2, 0.8));
+    for (let i = 0; i < 4; i++) parts.push(dome(1.7, C.dome, sx * (7 + i * 4.6 + 6), H + 0.5, 0, 0.75));
   }
-  // arcade facing the pools
-  for (let i = -6; i <= 6; i++) {
-    parts.push(box(0.6, 4.2, 0.6, C.white, i * 4.4, 0, D / 2 + 4.2));
-    if (i < 6) parts.push(box(3.2, 2.6, 0.1, C.glass, i * 4.4 + 2.2, 0.2, D / 2 + 0.06));
+  // arcade towards the pools (the sea side) and at the back
+  const arch = archPanel(4.6, 4.6, 3.4, 2.3, 0.5, C.terra2);
+  const arch2 = archPanel(4.6, 3.6, 2.6, 1.6, 0.4, C.terra2);
+  const nA = Math.floor(L / 4.6);
+  for (let i = 0; i < nA; i++) {
+    const x = -L / 2 + (i + 0.5) * (L / nA);
+    for (const s of [-1, 1]) {
+      parts.push(moved(arch, x, 0, s * (D / 2 + 3.4)));
+      if (Math.abs(x) > 12) parts.push(moved(arch2, x, 4.9, s * (D / 2 + 0.3)));
+      parts.push(box(3.2, 3.0, 0.08, C.glass, M.GLASS, x, 0.2, s * (D / 2 + 0.05)));
+      parts.push(box(3.4, 0.14, 0.14, C.wood, M.WOOD, x, 3.2, s * (D / 2 + 0.07)));
+    }
   }
-  parts.push(box(57, 0.4, 5.2, C.terracotta, 0, 4.2, D / 2 + 2.4));
-  for (let i = -7; i <= 7; i++) {
-    if (Math.abs(i) < 3) continue;
-    parts.push(box(2.2, 1.6, 0.1, C.glass, i * 4.4, 5.6, D / 2 + 0.06));
-    parts.push(box(2.2, 1.6, 0.1, C.glass, i * 4.4, 5.6, -D / 2 - 0.06));
+  for (const s of [-1, 1]) {
+    parts.push(box(L, 0.4, 3.9, C.terraDark, M.PLASTER, 0, 4.6, s * (D / 2 + 1.9)));
+    parts.push(box(L, 0.16, 3.9, C.stone, M.PAVING, 0, -0.08, s * (D / 2 + 1.9)));
+    parts.push(box(L, 0.5, 0.4, C.terra2, M.PLASTER, 0, 5.0, s * (D / 2 + 3.4)));
   }
-  return place(parts, b, terrainHeight(b.x, b.z));
+  return place(parts, b);
 }
 
-function restaurant(b) {
+function smallBuilding(b) {
   const parts = [];
-  const { w: L, d: D, h: H } = b;
-  parts.push(box(L, H + 1.5, D, C.plaster, 0, -1.5, 0));
-  parts.push(box(L + 0.4, 0.4, D + 0.4, C.terracotta, 0, H, 0));
-  parts.push(dome(4.2, C.white, 0, H + 0.4, 0, 0.75));
-  for (let i = -3; i <= 3; i++) {
-    parts.push(box(3.0, 2.8, 0.1, C.glass, i * 4, 0.3, D / 2 + 0.06));
-    parts.push(box(0.35, 3.4, 0.35, C.wood, i * 4 + 2, 0, D / 2 + 6));
+  const { w, d, h } = b;
+  if (b.kind === 'dive') {
+    parts.push(box(w, h + 1, d, C.white, M.PLASTER, 0, -1, 0));
+    parts.push(box(w + 0.3, 0.3, d + 0.3, C.teal, M.PAINT, 0, h, 0));
+    parts.push(box(3.2, 2.2, 0.08, C.glass, M.GLASS, -3, 0.3, d / 2 + 0.05));
+    parts.push(box(1.2, 2.2, 0.08, C.teal, M.PAINT, 2.5, 0.1, d / 2 + 0.05));
+    parts.push(box(w, 0.2, 3.6, C.thatch, M.THATCH, 0, 2.9, d / 2 + 1.8));
+    for (const sx of [-1, 1]) parts.push(box(0.2, 2.9, 0.2, C.wood, M.WOOD, sx * (w / 2 - 0.3), 0, d / 2 + 3.4));
+    for (let i = 0; i < 5; i++) parts.push(cyl(0.18, 0.18, 0.7, i % 2 ? C.yellow : C.teal, M.PAINT, -5 + i * 0.5, 0, d / 2 + 2.6, 10)); // tanks
+  } else if (b.kind === 'white') {
+    parts.push(box(w, h + 1, d, C.white, M.PLASTER, 0, -1, 0));
+    parts.push(box(w + 0.2, 0.4, d + 0.2, C.cream, M.PLASTER, 0, h, 0));
+    for (let i = -1; i <= 1; i++) for (const fy of [0.9, 3.9]) for (const s of [-1, 1]) {
+      parts.push(box(1.6, 1.5, 0.08, C.glass, M.GLASS, i * 5, fy, s * (d / 2 + 0.04)));
+    }
+  } else { // villa
+    parts.push(box(w, h + 1, d, C.cream, M.PLASTER, 0, -1, 0));
+    parts.push(box(w + 0.2, 0.3, d + 0.2, C.terra2, M.PLASTER, 0, h, 0));
+    parts.push(dome(2.0, C.white, -w / 4, h + 0.3, 0, 0.7));
+    parts.push(box(2.4, 2.1, 0.08, C.glass, M.GLASS, -2, 0.2, d / 2 + 0.04));
+    parts.push(box(1.0, 2.1, 0.08, C.wood, M.WOOD, 2.6, 0.1, d / 2 + 0.04));
+    parts.push(box(w * 0.7, 0.14, 3, C.woodLight, M.WOOD, 0, 2.6, d / 2 + 1.5));
+    for (const sx of [-1, 1]) parts.push(box(0.16, 2.6, 0.16, C.woodLight, M.WOOD, sx * w * 0.32, 0, d / 2 + 2.8));
   }
-  parts.push(box(L, 0.25, 6.4, C.thatch, 0, 3.4, D / 2 + 3.2));
-  return place(parts, b, terrainHeight(b.x, b.z));
+  return place(parts, b);
 }
 
-function diveCenter(b) {
-  const parts = [];
-  parts.push(box(b.w, b.h + 1, b.d, C.white, 0, -1, 0));
-  parts.push(box(b.w + 0.3, 0.3, b.d + 0.3, C.door, 0, b.h, 0));
-  parts.push(box(3, 2.3, 0.1, C.glass, -3, 0.2, b.d / 2 + 0.06));
-  parts.push(box(1.2, 2.3, 0.1, C.door, 2.5, 0.2, b.d / 2 + 0.06));
-  parts.push(box(b.w, 0.2, 4, C.thatch, 0, 2.9, b.d / 2 + 2));
-  for (const sx of [-1, 1]) parts.push(box(0.25, 2.9, 0.25, C.wood, sx * (b.w / 2 - 0.3), 0, b.d / 2 + 3.8));
-  return place(parts, b, terrainHeight(b.x, b.z));
+function thatchRoof(r, h, y, seg, color = C.thatch) {
+  const out = [];
+  const cone = new THREE.ConeGeometry(r, h, seg, 3, true);
+  cone.translate(0, y + h / 2, 0);
+  out.push(prep(cone, color, M.THATCH));
+  const skirt = new THREE.CylinderGeometry(r, r + 0.12, 0.4, seg, 1, true);
+  skirt.translate(0, y - 0.2, 0);
+  out.push(prep(skirt, C.thatchDark, M.THATCH));
+  return out;
 }
 
 function hut(h) {
   const parts = [];
   const y0 = terrainHeight(h.x, h.z);
   if (h.kind === 'tower') {
-    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) parts.push(box(0.16, 4.6, 0.16, C.white, sx * 0.95, 0, sz * 0.95));
-    parts.push(box(2.3, 0.14, 2.3, C.wood, 0, 2.3, 0));
-    parts.push(box(2.3, 0.7, 0.08, C.white, 0, 2.44, -1.1));
-    parts.push(box(0.08, 0.7, 2.3, C.white, -1.1, 2.44, 0));
-    parts.push(box(0.08, 0.7, 2.3, C.white, 1.1, 2.44, 0));
-    parts.push(box(2.8, 0.14, 2.8, C.red, 0, 4.6, 0));
-    parts.push(box(0.06, 1.6, 0.06, C.white, 1.2, 4.7, 1.2));
-    parts.push(box(0.8, 0.5, 0.03, C.red, 1.62, 5.75, 1.2));
-    parts.push(box(0.5, 0.06, 0.12, C.wood, 0, 0.6, 1.25));
-    parts.push(box(0.5, 0.06, 0.12, C.wood, 0, 1.2, 1.2));
-    parts.push(box(0.5, 0.06, 0.12, C.wood, 0, 1.8, 1.15));
+    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) parts.push(box(0.16, 4.6, 0.16, C.white, M.WOOD, sx * 0.95, 0, sz * 0.95));
+    parts.push(box(2.3, 0.14, 2.3, C.woodLight, M.WOOD, 0, 2.3, 0));
+    parts.push(box(2.3, 0.7, 0.08, C.white, M.WOOD, 0, 2.44, -1.1));
+    parts.push(box(0.08, 0.7, 2.3, C.white, M.WOOD, -1.1, 2.44, 0));
+    parts.push(box(0.08, 0.7, 2.3, C.white, M.WOOD, 1.1, 2.44, 0));
+    parts.push(...thatchRoof(2.2, 1.1, 4.6, 8));
+    parts.push(box(0.06, 1.8, 0.06, C.white, M.PAINT, 1.2, 4.7, 1.2));
+    parts.push(box(0.8, 0.5, 0.03, C.red, M.PAINT, 1.62, 5.95, 1.2));
+    for (let i = 0; i < 3; i++) parts.push(box(0.5, 0.06, 0.12, C.woodLight, M.WOOD, 0, 0.6 + i * 0.6, 1.25 - i * 0.05));
+  } else if (h.kind === 'restaurant') {
+    // big round open-sided restaurant under a two-tier thatched roof
+    parts.push(cyl(h.r, h.r, 0.3, C.stone, M.PAVING, 0, -0.1, 0, 32));
+    parts.push(cyl(h.r - 0.3, h.r - 0.3, 0.9, C.stone, M.STONE, 0, 0.2, 0, 32, true));
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * 6.283;
+      parts.push(cyl(0.16, 0.18, 3.6, C.wood, M.WOOD, Math.cos(a) * (h.r - 0.4), 0.2, Math.sin(a) * (h.r - 0.4), 8));
+    }
+    parts.push(cyl(0.3, 0.34, 7.2, C.wood, M.WOOD, 0, 0.2, 0, 10));
+    parts.push(...thatchRoof(h.r + 1.3, 3.2, 3.7, 32));
+    parts.push(...thatchRoof(h.r * 0.42, 2.0, 6.5, 24));
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * 6.283 + 0.3;
+      parts.push(cyl(0.55, 0.55, 0.06, C.woodLight, M.WOOD, Math.cos(a) * 4.2, 0.95, Math.sin(a) * 4.2, 12));
+      parts.push(cyl(0.06, 0.06, 0.75, C.wood, M.WOOD, Math.cos(a) * 4.2, 0.2, Math.sin(a) * 4.2, 6));
+    }
+  } else if (h.kind === 'pavilion') {
+    parts.push(cyl(h.r, h.r, 0.25, C.stone, M.PAVING, 0, -0.1, 0, 6));
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * 6.283 + 0.52;
+      parts.push(cyl(0.14, 0.16, 3.2, C.wood, M.WOOD, Math.cos(a) * (h.r - 0.5), 0.15, Math.sin(a) * (h.r - 0.5), 8));
+    }
+    parts.push(...thatchRoof(h.r + 0.9, 2.6, 3.3, 6));
+    parts.push(cyl(1.3, 1.3, 1.05, C.wood, M.WOOD, 0, 0.15, 0, 12));
+    parts.push(cyl(1.5, 1.5, 0.08, C.woodLight, M.WOOD, 0, 1.2, 0, 12));
   } else {
-    parts.push(cyl(h.r - 1.2, h.r - 1.2, 1.15, C.wood, 0, 0, 0, 14));
-    parts.push(cyl(h.r - 1.0, h.r - 1.0, 0.1, C.stone, 0, 1.15, 0, 14));
+    // round bar
+    parts.push(cyl(h.r - 1.2, h.r - 1.2, 1.1, C.wood, M.WOOD, 0, 0, 0, 18));
+    parts.push(cyl(h.r - 0.95, h.r - 0.95, 0.1, C.woodLight, M.WOOD, 0, 1.1, 0, 18));
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * 6.283;
-      parts.push(cyl(0.09, 0.09, 3.1, C.wood, Math.cos(a) * (h.r - 0.4), 0, Math.sin(a) * (h.r - 0.4), 6));
+      parts.push(cyl(0.09, 0.1, 3.1, C.wood, M.WOOD, Math.cos(a) * (h.r - 0.4), 0, Math.sin(a) * (h.r - 0.4), 8));
+      parts.push(cyl(0.2, 0.2, 0.06, C.woodLight, M.WOOD, Math.cos(a + 0.5) * (h.r - 0.3), 0.72, Math.sin(a + 0.5) * (h.r - 0.3), 10)); // stools
+      parts.push(cyl(0.04, 0.04, 0.72, C.wood, M.WOOD, Math.cos(a + 0.5) * (h.r - 0.3), 0, Math.sin(a + 0.5) * (h.r - 0.3), 6));
     }
-    parts.push(cyl(0.15, 0.15, 3.6, C.wood, 0, 0, 0, 6));
-    const roof = new THREE.ConeGeometry(h.r + 1.1, 2.7, 16, 1, true);
-    roof.translate(0, 3.0 + 1.35, 0);
-    parts.push(prep(roof, C.thatch));
-    const skirt = new THREE.CylinderGeometry(h.r + 1.1, h.r + 1.25, 0.45, 16, 1, true);
-    skirt.translate(0, 2.85, 0);
-    parts.push(prep(skirt, C.thatch.clone().multiplyScalar(0.8)));
+    parts.push(cyl(0.15, 0.15, 3.8, C.wood, M.WOOD, 0, 0, 0, 8));
+    parts.push(...thatchRoof(h.r + 1.1, 2.6, 3.0, 22));
   }
   const g = mergeGeometries(parts);
   g.translate(h.x, y0, h.z);
   return g;
 }
 
-function ellipseShape(rx, rz, n = 56) {
+// ---- pools ----------------------------------------------------------------------------
+function shapeFrom(points, flipZ = true) {
   const s = new THREE.Shape();
-  for (let i = 0; i <= n; i++) {
-    const a = (i / n) * Math.PI * 2;
-    const x = Math.cos(a) * rx, y = Math.sin(a) * rz;
-    if (i === 0) s.moveTo(x, y); else s.lineTo(x, y);
-  }
+  points.forEach(([x, z], i) => { if (i === 0) s.moveTo(x, flipZ ? -z : z); else s.lineTo(x, flipZ ? -z : z); });
   return s;
 }
 
 function buildPools(scene) {
   const deckParts = [];
   for (const p of POOLS) {
-    // deck with a hole
-    const outer = ellipseShape(p.rx + 7.5, p.rz + 7.5);
+    const outline = poolOutline(p, 72);
+    // flagstone deck with the pool cut out
+    const deckShape = shapeFrom(poolOutline(p, 72, 7.5));
     const hole = new THREE.Path();
-    for (let i = 0; i <= 56; i++) {
-      const a = -(i / 56) * Math.PI * 2;
-      const x = Math.cos(a) * p.rx, y = Math.sin(a) * p.rz;
-      if (i === 0) hole.moveTo(x, y); else hole.lineTo(x, y);
-    }
-    outer.holes.push(hole);
-    const deck = new THREE.ShapeGeometry(outer, 8);
+    [...outline].reverse().forEach(([x, z], i) => { if (i === 0) hole.moveTo(x, -z); else hole.lineTo(x, -z); });
+    deckShape.holes.push(hole);
+    const deck = new THREE.ShapeGeometry(deckShape, 6);
     deck.rotateX(-Math.PI / 2);
-    deck.translate(p.x, p.deckY, p.z);
-    deckParts.push(prep(deck, C.stone));
-    // coping stones around the edge
-    const rim = new THREE.TorusGeometry(1, 0.012, 4, 56);
-    rim.rotateX(Math.PI / 2); rim.scale(p.rx + 0.15, 6, p.rz + 0.15);
-    rim.translate(p.x, p.deckY + 0.03, p.z);
-    deckParts.push(prep(rim, C.white));
-
-    // basin (tiles + walls), lit by caustics at this pool's own water level
-    const basinParts = [];
-    const floor = new THREE.ShapeGeometry(ellipseShape(p.rx, p.rz), 8);
-    floor.rotateX(-Math.PI / 2);
-    floor.translate(p.x, p.floor, p.z);
-    basinParts.push(prep(floor, C.tile));
-    const hW = p.deckY - p.floor;
-    const wall = new THREE.CylinderGeometry(1, 1, hW, 56, 1, true);
-    wall.scale(-p.rx, 1, p.rz); // flipped so the inside faces the swimmer
-    wall.translate(p.x, p.floor + hW / 2, p.z);
-    const w2 = prep(wall, C.tile);
-    // flipping x mirrors the winding; reverse triangles to keep them front-facing inwards
-    const pa = w2.attributes.position, na = w2.attributes.normal;
-    for (let i = 0; i < na.count; i++) na.setXYZ(i, -(pa.getX(i) - p.x) / p.rx, 0, -(pa.getZ(i) - p.z) / p.rz);
-    basinParts.push(w2);
-    if (p.island) {
-      const isl = new THREE.CylinderGeometry(p.island.r, p.island.r + 0.3, hW + 0.05, 28);
-      isl.translate(p.island.x, p.floor + (hW + 0.05) / 2, p.island.z);
-      basinParts.push(prep(isl, C.stone));
+    deck.translate(0, p.deckY, 0);
+    deckParts.push(prep(deck, C.paving, M.PAVING));
+    // coping stones
+    const rimPts = poolOutline(p, 72, 0.32);
+    for (let i = 0; i < 72; i++) {
+      const [x0, z0] = rimPts[i], [x1, z1] = rimPts[(i + 1) % 72];
+      const len = Math.hypot(x1 - x0, z1 - z0);
+      deckParts.push(box(len + 0.03, 0.07, 0.62, C.white, M.STONE, (x0 + x1) / 2, p.deckY, (z0 + z1) / 2, Math.atan2(-(z1 - z0), x1 - x0)));
     }
-    const basinMat = patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, side: THREE.DoubleSide }), {
-      waterLevel: p.level, key: 'basin',
-      color: 'diffuseColor.rgb *= 0.86 + 0.14*step(0.07, fract(vWPos.x*1.6))*step(0.07, fract(vWPos.z*1.6));',
+
+    // basin: tiled floor and walls, lit by caustics at this pool's own level
+    const basinParts = [];
+    const floor = new THREE.ShapeGeometry(shapeFrom(outline), 6);
+    floor.rotateX(-Math.PI / 2);
+    floor.translate(0, p.floor, 0);
+    basinParts.push(prep(floor, C.tile, M.TILE));
+    const pos = [], nor = [];
+    for (let i = 0; i < 72; i++) {
+      const [x0, z0] = outline[i], [x1, z1] = outline[(i + 1) % 72];
+      const nx = -(z1 - z0), nz = x1 - x0, nl = Math.hypot(nx, nz) || 1;
+      // inward normal: the outline runs counter-clockwise around the centre
+      const cx = p.x - x0, cz = p.z - z0, sgn = (nx * cx + nz * cz) > 0 ? 1 : -1;
+      const quad = sgn > 0
+        ? [x0, p.floor, z0, x1, p.floor, z1, x1, p.deckY, z1, x0, p.floor, z0, x1, p.deckY, z1, x0, p.deckY, z0]
+        : [x0, p.floor, z0, x1, p.deckY, z1, x1, p.floor, z1, x0, p.floor, z0, x0, p.deckY, z0, x1, p.deckY, z1];
+      pos.push(...quad);
+      for (let k = 0; k < 6; k++) nor.push(sgn * nx / nl, 0, sgn * nz / nl);
+    }
+    const wall = new THREE.BufferGeometry();
+    wall.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    wall.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    basinParts.push(prep(wall, C.tile, M.TILE));
+    for (const isl of p.islands) {
+      const hW = p.deckY - p.floor + 0.05;
+      const g = new THREE.CylinderGeometry(isl.r, isl.r + 0.35, hW, 26);
+      g.translate(isl.x, p.floor + hW / 2, isl.z);
+      basinParts.push(prep(g, C.stone, M.TILE));
+    }
+    const green = p.tint === 'green';
+    const basinMat = patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.3, side: THREE.DoubleSide }), {
+      waterLevel: p.level, key: 'basin' + (green ? 'g' : ''),
+      color: green
+        ? 'diffuseColor.rgb = mix(vec3(0.2,0.3,0.12), vec3(0.34,0.4,0.18), fbm(vWPos.xz*0.6));'
+        : `vec2 tp = vWPos.xz*4.0 + vWPos.y*4.0; vec2 tf = abs(fract(tp) - 0.5);
+float grout = smoothstep(0.44, 0.48, max(tf.x, tf.y));
+vec2 tid = floor(tp);
+diffuseColor.rgb *= (0.86 + 0.2*hash12(tid)) * (1.0 - 0.3*grout);
+diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.1,0.32,0.62), step(0.93, hash12(tid + 7.0))*0.6);`,
     });
     const basin = new THREE.Mesh(mergeGeometries(basinParts), basinMat);
     basin.receiveShadow = true;
@@ -238,7 +353,8 @@ function buildPools(scene) {
   return deckParts;
 }
 
-function path(points, width, color) {
+// A strip of paving draped over the terrain along a polyline.
+function path(points, width, color, mat = M.PAVING, lift = 0.05) {
   const pos = [], idx = [];
   for (let i = 0; i < points.length; i++) {
     const [x, z] = points[i];
@@ -247,18 +363,27 @@ function path(points, width, color) {
     let tx = nx - px, tz = nz - pz;
     const l = Math.hypot(tx, tz) || 1; tx /= l; tz /= l;
     const ox = -tz * width / 2, oz = tx * width / 2;
-    pos.push(x + ox, terrainHeight(x + ox, z + oz) + 0.05, z + oz, x - ox, terrainHeight(x - ox, z - oz) + 0.05, z - oz);
-    if (i < points.length - 1) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+    pos.push(x + ox, terrainHeight(x + ox, z + oz) + lift, z + oz, x - ox, terrainHeight(x - ox, z - oz) + lift, z - oz);
+    if (i < points.length - 1) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
-  const n = g.toNonIndexed();
-  // make sure the strip faces up regardless of winding
-  const na = n.attributes.normal;
-  for (let i = 0; i < na.count; i++) if (na.getY(i) < 0) na.setXYZ(i, -na.getX(i), -na.getY(i), -na.getZ(i));
-  return paint(n, color);
+  const na = g.attributes.normal;
+  if (na.getY(0) < 0) { g.setIndex(idx.map((_, i) => idx[i - (i % 3) + [0, 2, 1][i % 3]])); g.computeVertexNormals(); }
+  return prep(g, color, mat);
+}
+function curve(a, b, wobble, n = 14) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const x = a[0] + (b[0] - a[0]) * t, z = a[1] + (b[1] - a[1]) * t;
+    const nx = -(b[1] - a[1]), nz = b[0] - a[0], nl = Math.hypot(nx, nz) || 1;
+    const w = Math.sin(t * Math.PI * 2) * wobble;
+    pts.push([x + nx / nl * w, z + nz / nl * w]);
+  }
+  return pts;
 }
 
 function signTexture() {
@@ -266,102 +391,169 @@ function signTexture() {
     g.fillStyle = '#f3e6c4'; g.fillRect(0, 0, w, h);
     g.strokeStyle = '#b3261e'; g.lineWidth = 14; g.strokeRect(10, 10, w - 20, h - 20);
     g.fillStyle = '#b3261e'; g.textAlign = 'center';
-    g.font = 'bold 62px sans-serif'; g.fillText('⚠ POZOR ⚠', w / 2, 86);
-    g.fillStyle = '#2b2118'; g.font = 'bold 34px sans-serif';
-    g.fillText('Za bójkami je plytčina,', w / 2, 146);
-    g.fillText('mangrovy a', w / 2, 190);
-    g.fillStyle = '#b3261e'; g.font = 'bold 50px sans-serif';
-    g.fillText('KROKODÍLY', w / 2, 248);
-    g.fillStyle = '#2b2118'; g.font = '24px sans-serif';
-    g.fillText('Plávanie na vlastné riziko (je to sen)', w / 2, 290);
+    g.font = 'bold 64px sans-serif'; g.fillText('⚠ POZOR ⚠', w / 2, 92);
+    g.fillStyle = '#2b2118'; g.font = 'bold 36px sans-serif';
+    g.fillText('Za bójkami je plytčina,', w / 2, 156);
+    g.fillText('mangrovy a', w / 2, 202);
+    g.fillStyle = '#b3261e'; g.font = 'bold 58px sans-serif';
+    g.fillText('KROKODÍLY', w / 2, 272);
   });
 }
 
 export function createResort(scene, quality) {
-  const parts = [];
-  for (const b of BUILDINGS) {
-    if (b.kind === 'main') parts.push(mainBuilding(b));
-    else if (b.kind === 'restaurant') parts.push(restaurant(b));
-    else if (b.kind === 'dive') parts.push(diveCenter(b));
-    else parts.push(roomBlock(b));
+  const T = detailTextures();
+  const mat = patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 }), {
+    key: 'resort',
+    uniforms: { tStucco: { value: T.stucco }, tStone: { value: T.stone }, tPaving: { value: T.paving }, tWood: { value: T.wood }, tThatch: { value: T.thatch } },
+    vertexPars: 'attribute float aMat;\nvarying float vMat;\nvarying vec3 vWN;',
+    vertex: `vMat = aMat;
+#ifdef USE_INSTANCING
+  vWN = normalize(mat3(instanceMatrix) * normal);
+#else
+  vWN = normal;
+#endif`,
+    fragmentPars: /* glsl */ `
+varying float vMat; varying vec3 vWN;
+uniform sampler2D tStucco, tStone, tPaving, tWood, tThatch;
+float gDetail;
+vec3 tri(sampler2D t, float s){
+  vec3 bw = pow(abs(vWN), vec3(4.0)); bw /= (bw.x + bw.y + bw.z);
+  return texture2D(t, vWPos.zy*s).rgb*bw.x + texture2D(t, vWPos.xz*s).rgb*bw.y + texture2D(t, vWPos.xy*s).rgb*bw.z;
+}`,
+    color: /* glsl */ `
+{
+  vec3 det = vec3(0.78);
+  float k = 1.0;
+  if (vMat < 0.5) { det = tri(tStucco, 0.42); k = 1.45;
+    // rain streaks and sun-bleached patches on the plaster
+    float streak = smoothstep(0.5, 0.9, vnoise(vec2(dot(vWPos.xz, vec2(2.3, 1.9)), vWPos.y*0.22)));
+    det *= 1.0 - 0.2*streak; det *= 0.86 + 0.3*fbm(vWPos.xz*0.11 + vWPos.y*0.3);
   }
+  else if (vMat < 1.5) { det = tri(tStone, 0.36); k = 1.3; }
+  else if (vMat < 2.5) { det = tri(tPaving, 0.5); k = 1.2; }
+  else if (vMat < 3.5) { det = tri(tWood, 0.9); k = 1.3; }
+  else if (vMat < 4.5) { det = tri(tThatch, 0.55); k = 1.5; det *= 0.8 + 0.35*vnoise(vWPos.xz*1.4); }
+  else if (vMat < 5.5) { det = vec3(0.8); k = 1.0; }
+  gDetail = dot(det, vec3(0.333));
+  diffuseColor.rgb *= det * k;
+}`,
+    bump: 'bumpH = gDetail * (vMat < 0.5 ? 0.012 : vMat < 2.5 ? 0.04 : vMat < 4.5 ? 0.035 : 0.0);',
+    patch(shader) {
+      shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+roughnessFactor = (vMat > 4.5 && vMat < 5.5) ? 0.05 : (vMat > 5.5 ? 0.45 : 0.88);`);
+    },
+  });
+
+  // ---- static geometry ----
+  const parts = [];
+  for (const b of BUILDINGS) parts.push(b.kind === 'main' ? mainBuilding(b) : smallBuilding(b));
   for (const h of HUTS) parts.push(hut(h));
   parts.push(...buildPools(scene));
 
-  // promenade behind the beach and two garden paths
+  // promenade behind the beach and garden paths between the blocks
   const prom = [];
-  for (let x = -285; x <= 285; x += 5) prom.push([x, shoreZ(x) - 37]);
-  parts.push(path(prom, 3.6, C.stone));
-  for (const sx of [-62, 62]) {
-    const pts = [];
-    for (let z = -206; z <= -40; z += 5) pts.push([sx + 9 * Math.sin((z + 40) / 38), z]);
-    parts.push(path(pts, 2.6, C.stone));
-  }
+  for (let x = -270; x <= 235; x += 4) prom.push([x, shoreZ(x) - 30]);
+  parts.push(path(prom, 3.4, C.paving));
+  const paths = [
+    [[52, -31], [50, -50]], [[50, -84], [46, -150]], [[-20, -31], [-24, -100]], [[-90, -31], [-88, -78]],
+    [[-88, -104], [-96, -200]], [[40, -68], [8, -62]], [[-22, -64], [-66, -90]], [[4, -31], [2, -42]],
+    [[44, -150], [-60, -152]], [[104, -40], [106, -150]], [[-128, -40], [-112, -100]], [[70, -150], [44, -172]],
+  ];
+  for (const [a, b] of paths) parts.push(path(curve(a, b, 1.6), 2.3, C.paving));
 
-  const mat = patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82 }), {
-    key: 'resort',
-    color: 'diffuseColor.rgb *= 0.9 + 0.2*vnoise(vWPos.xz*0.7 + vWPos.y*1.3);',
-  });
+  // beach volleyball court
+  {
+    const v = VOLLEYBALL, y = terrainHeight(v.x, v.z);
+    parts.push(box(v.w, 0.12, v.d, C.sand, M.PAINT, v.x, y - 0.04, v.z));
+    for (const s of [-1, 1]) parts.push(cyl(0.05, 0.05, 2.5, C.white, M.PAINT, v.x, y, v.z + s * (v.d / 2 + 0.3), 8));
+    parts.push(box(0.03, 0.9, v.d + 0.6, C.white, M.PAINT, v.x, y + 1.5, v.z));
+  }
+  // lamp posts along the promenade
+  for (const l of LAYOUT.lamps) {
+    parts.push(cyl(0.05, 0.07, 3.2, C.lamp, M.PAINT, l.x, l.y, l.z, 8));
+    parts.push(cyl(0.2, 0.12, 0.3, C.lamp, M.PAINT, l.x, l.y + 3.2, l.z, 8));
+    parts.push(cyl(0.16, 0.16, 0.26, C.cream, M.GLASS, l.x, l.y + 3.5, l.z, 8));
+    parts.push(cyl(0.02, 0.24, 0.16, C.lamp, M.PAINT, l.x, l.y + 3.76, l.z, 8));
+  }
   const mesh = new THREE.Mesh(mergeGeometries(parts), mat);
   mesh.castShadow = true; mesh.receiveShadow = true;
   scene.add(mesh);
 
-  // umbrellas
+  // ---- instanced room units ----
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v3 = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0);
+  for (const kind of ['rooms', 'bungalow']) {
+    const list = LAYOUT.units.filter((u) => u.kind === kind);
+    const im = new THREE.InstancedMesh(kind === 'rooms' ? roomUnitGeometry() : bungalowGeometry(), mat, list.length);
+    list.forEach((u, i) => {
+      q.setFromAxisAngle(up, u.rot);
+      m4.compose(v3.set(u.x, u.y, u.z), q, one);
+      im.setMatrixAt(i, m4);
+    });
+    im.castShadow = true; im.receiveShadow = true; im.computeBoundingSphere();
+    scene.add(im);
+  }
+
+  // ---- umbrellas: thatch on a yellow pole ----
   {
-    const pole = cyl(0.045, 0.055, 2.5, C.wood, 0, 0, 0, 6);
-    const top = new THREE.ConeGeometry(1.75, 0.95, 12, 1, true);
-    top.translate(0, 2.5 + 0.2, 0);
-    const skirt = new THREE.CylinderGeometry(1.75, 1.85, 0.28, 12, 1, true);
-    skirt.translate(0, 2.1, 0);
-    const g = mergeGeometries([pole, prep(top, C.thatch), prep(skirt, C.thatch.clone().multiplyScalar(0.78))]);
-    const um = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, side: THREE.DoubleSide });
-    const im = new THREE.InstancedMesh(g, um, LAYOUT.umbrellas.length);
-    const m4 = new THREE.Matrix4();
+    const pole = cyl(0.05, 0.06, 2.45, C.yellow, M.PAINT, 0, 0, 0, 8);
+    const g = mergeGeometries([pole, ...thatchRoof(1.85, 0.95, 2.25, 20), cyl(0.12, 0.3, 0.2, C.thatchDark, M.THATCH, 0, 3.15, 0, 8)]);
+    const umat = mat.clone();
+    umat.side = THREE.DoubleSide;
+    umat.onBeforeCompile = mat.onBeforeCompile; umat.customProgramCacheKey = () => mat.customProgramCacheKey() + 'ds';
+    const im = new THREE.InstancedMesh(g, umat, LAYOUT.umbrellas.length);
     LAYOUT.umbrellas.forEach((u, i) => { m4.makeRotationY(u.rot); m4.setPosition(u.x, u.y - 0.1, u.z); im.setMatrixAt(i, m4); });
-    im.castShadow = true; im.receiveShadow = true; im.frustumCulled = false;
+    im.castShadow = true; im.receiveShadow = true; im.computeBoundingSphere();
     scene.add(im);
   }
-  // sunbeds
+  // ---- sunbeds: white frame, blue and white striped mattress ----
   {
-    const frame = box(0.68, 0.08, 1.45, C.white, 0, 0.3, 0.2);
-    const back = new THREE.BoxGeometry(0.68, 0.08, 0.75);
-    back.rotateX(0.75); back.translate(0, 0.58, -0.72);
-    const cushion = box(0.6, 0.06, 1.4, C.cushion, 0, 0.38, 0.2);
-    const cb = new THREE.BoxGeometry(0.6, 0.06, 0.7);
-    cb.rotateX(0.75); cb.translate(0, 0.64, -0.7);
-    const legs = [box(0.6, 0.3, 0.06, C.white, 0, 0, 0.8), box(0.6, 0.3, 0.06, C.white, 0, 0, -0.35)];
-    const g = mergeGeometries([frame, prep(back, C.white), cushion, prep(cb, C.cushion), ...legs]);
-    const sm = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 });
+    const P = [];
+    const plain = (g) => { const n = g.toNonIndexed(); n.deleteAttribute('uv'); return n; };
+    const add = (w, h, d, x, y, z, rx = 0) => { const g = new THREE.BoxGeometry(w, h, d); if (rx) g.rotateX(rx); g.translate(x, y, z); P.push(plain(g)); };
+    add(0.7, 0.07, 1.45, 0, 0.33, 0.2); add(0.7, 0.07, 0.78, 0, 0.6, -0.74, 0.72);            // frame
+    add(0.62, 0.09, 1.4, 0, 0.41, 0.2); add(0.62, 0.09, 0.72, 0, 0.67, -0.71, 0.72);          // mattress
+    for (const [x, z] of [[-0.3, 0.82], [0.3, 0.82], [-0.3, -0.3], [0.3, -0.3]]) add(0.06, 0.3, 0.06, x, 0.15, z);
+    for (const x of [-0.32, 0.32]) add(0.05, 0.06, 1.5, x, 0.27, 0.2);
+    const g = mergeGeometries(P);
+    const sm = patchMaterial(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75 }), {
+      key: 'sunbed',
+      color: `float mat = step(0.375, vObj.y) * step(abs(vObj.x), 0.312);
+float stripe = step(0.5, fract(vObj.z*3.2 + vObj.y*1.2));
+vec3 cloth = mix(vec3(0.93,0.94,0.96), vec3(0.08,0.3,0.72), stripe);
+diffuseColor.rgb = mix(vec3(0.9,0.93,0.9), cloth, mat);`,
+    });
     const im = new THREE.InstancedMesh(g, sm, LAYOUT.sunbeds.length);
-    const m4 = new THREE.Matrix4();
     LAYOUT.sunbeds.forEach((s, i) => { m4.makeRotationY(s.rot); m4.setPosition(s.x, s.y, s.z); im.setMatrixAt(i, m4); });
-    im.castShadow = quality === 'high'; im.receiveShadow = true; im.frustumCulled = false;
+    im.castShadow = quality !== 'low'; im.receiveShadow = true; im.computeBoundingSphere();
     scene.add(im);
   }
-  // buoys
+  // ---- buoys ----
   {
-    const g = new THREE.SphereGeometry(0.3, 12, 8);
-    const bm = patchMaterial(new THREE.MeshStandardMaterial({ color: 0xff5a14, roughness: 0.45 }), { key: 'buoy' });
+    const g = new THREE.SphereGeometry(0.3, 16, 10);
+    const bm = patchMaterial(new THREE.MeshStandardMaterial({ color: 0xff5a14, roughness: 0.4 }), {
+      key: 'buoy', color: 'diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.95), step(0.12, vObj.y)*step(vObj.y, 0.2));',
+    });
     const im = new THREE.InstancedMesh(g, bm, LAYOUT.buoys.length);
-    const m4 = new THREE.Matrix4();
     LAYOUT.buoys.forEach((b, i) => { m4.makeTranslation(b.x, 0.06, b.z); im.setMatrixAt(i, m4); });
-    im.frustumCulled = false; im.castShadow = false;
+    im.computeBoundingSphere();
     scene.add(im);
   }
-  // warning sign near the spawn
+  // ---- warning sign near the spawn ----
   {
-    const sx = 10.5, sz = shoreZ(10.5) - 1.5, sy = terrainHeight(sx, sz);
+    const sx = 10.5, sz = shoreZ(10.5) - 2.2, sy = terrainHeight(sx, sz);
     const board = new THREE.Mesh(new THREE.PlaneGeometry(2.1, 1.3), new THREE.MeshStandardMaterial({ map: signTexture(), roughness: 0.8, side: THREE.DoubleSide }));
     board.position.set(sx, sy + 1.75, sz);
     board.rotation.y = Math.PI + 0.25;
     board.castShadow = true;
     scene.add(board);
-    const postG = mergeGeometries([box(0.1, 2.4, 0.1, C.wood, -0.9, 0, 0.06), box(0.1, 2.4, 0.1, C.wood, 0.9, 0, 0.06)]);
-    const posts = new THREE.Mesh(postG, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 }));
-    posts.position.set(sx, sy - 0.3, sz);
-    posts.rotation.y = Math.PI + 0.25;
-    posts.castShadow = true;
-    scene.add(posts);
+    const pg = new THREE.CylinderGeometry(0.05, 0.06, 2.5, 8);
+    const pm = new THREE.MeshStandardMaterial({ color: 0x6b4a2c, roughness: 0.9 });
+    for (const s of [-1, 1]) {
+      const post = new THREE.Mesh(pg, pm);
+      post.position.set(sx + Math.cos(0.25) * s * 0.9 * -1, sy + 0.95, sz + Math.sin(0.25) * s * 0.9 + 0.05);
+      post.castShadow = true;
+      scene.add(post);
+    }
   }
   return mesh;
 }

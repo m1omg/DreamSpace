@@ -20,7 +20,9 @@ import { createReef } from './gfx/reef.js';
 import { createCrocModel } from './gfx/crocModel.js';
 import { createPearls } from './gfx/pearls.js';
 import { createParticles } from './gfx/particles.js';
-import { createInput } from './input.js';
+import { createInput, ACTIONS, keyName } from './input.js';
+import { createHazardModels } from './gfx/hazards.js';
+import { resetHazards } from './sim/hazards.js';
 import { createHud } from './hud.js';
 import { createAudio } from './audio.js';
 
@@ -35,6 +37,10 @@ const coarse = matchMedia('(pointer: coarse)').matches;
 const quality = params.get('q') || store.get('quality', coarse ? 'low' : 'medium');
 $('quality').value = quality;
 $('sens').value = store.get('sens', '1');
+$('fov').value = store.get('fov', '76');
+$('invertY').checked = store.get('invertY', '0') === '1';
+let baseFov = parseFloat($('fov').value);
+$('fovVal').textContent = baseFov + '°';
 
 // ---- renderer & world -------------------------------------------------------------
 const canvas = $('view');
@@ -44,7 +50,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.info.autoReset = true;
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(FOG_AIR.color.getHex(), FOG_AIR.density);
-const camera = new THREE.PerspectiveCamera(74, 1, 0.15, 9000);
+const camera = new THREE.PerspectiveCamera(76, 1, 0.15, 9000);
 camera.rotation.order = 'YXZ';
 
 const pipeline = createPipeline(renderer, scene, camera, quality);
@@ -62,6 +68,8 @@ const reef = createReef(scene, quality);
 let game = createGame();
 const crocModels = game.crocs.map((c) => createCrocModel(scene, c));
 const pearls = createPearls(scene, game.pearls);
+const hazardModels = createHazardModels(scene, game.hazards);
+$('pearlTotal').textContent = game.pearls.length;
 const particles = createParticles(scene);
 const hud = createHud();
 const audio = createAudio();
@@ -83,14 +91,45 @@ let state = 'menu'; // menu | play | end
 const input = createInput(canvas, {
   yaw: game.player.yaw,
   sensitivity: parseFloat($('sens').value),
+  invertY: $('invertY').checked,
+  active: () => state === 'play',
+  binds: (() => { try { return JSON.parse(store.get('binds', 'null')); } catch (e) { return null; } })(),
+  onBindsChanged(b) { store.set('binds', JSON.stringify(b)); renderBinds(); },
+  onAction(a) { if (a === 'mute' && state === 'play') hud.toast(audio.toggleMute() ? 'Zvuk vypnutý' : 'Zvuk zapnutý', 1.2); },
   touchUI: { root: $('touch'), zone: $('tzone'), stick: $('stick'), knob: $('knob'), jump: $('tJump'), dive: $('tDive') },
   onLock(locked) { if (!locked && state === 'play') pause(); },
   onKey(code) {
-    if (code === 'KeyM') hud.toast(audio.toggleMute() ? 'Zvuk vypnutý' : 'Zvuk zapnutý', 1.2);
-    if (code === 'Enter' && state === 'menu' && !$('start').disabled) start();
+    if (code === 'Enter' && state === 'menu' && !$('start').disabled && !input.capturing) start();
   },
 });
 $('sens').addEventListener('input', (e) => { input.setSensitivity(parseFloat(e.target.value)); store.set('sens', e.target.value); });
+$('fov').addEventListener('input', (e) => { baseFov = parseFloat(e.target.value); $('fovVal').textContent = baseFov + '°'; store.set('fov', e.target.value); });
+$('invertY').addEventListener('change', (e) => { input.setInvertY(e.target.checked); store.set('invertY', e.target.checked ? '1' : '0'); });
+$('bindReset').addEventListener('click', () => input.resetBinds());
+
+// key list in the menu and the rebinding table
+function renderBinds() {
+  const b = input.binds;
+  const k = (a) => b[a].filter(Boolean).map((c) => `<kbd>${keyName(c)}</kbd>`).join(' ') || '<kbd>—</kbd>';
+  const k1 = (a) => `<kbd>${keyName(b[a][0] || b[a][1])}</kbd>`;
+  $('keyList').innerHTML = [
+    `${k1('forward')} ${k1('left')} ${k1('back')} ${k1('right')} pohyb · <kbd>myš</kbd> rozhľad`,
+    `${k('jump')} skok / hore vo vode`,
+    `${k('dive')} potopiť sa`,
+    `${k('sprint')} šprint / rýchle plávanie`,
+    `${k('mute')} zvuk · <kbd>Esc</kbd> pauza`,
+  ].map((t) => `<li>${t}</li>`).join('');
+  $('binds').innerHTML = ACTIONS.map(([a, label]) =>
+    `<tr><td>${label}</td><td><button data-a="${a}" data-s="0">${keyName(b[a][0])}</button></td><td><button data-a="${a}" data-s="1">${keyName(b[a][1])}</button></td></tr>`).join('');
+}
+$('binds').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || input.capturing) return;
+  btn.classList.add('wait'); btn.textContent = 'stlač…';
+  // start listening after this click has finished, so the click itself is not captured
+  setTimeout(() => input.captureBind(btn.dataset.a, +btn.dataset.s, () => renderBinds()), 0);
+});
+
 $('quality').addEventListener('change', (e) => {
   store.set('quality', e.target.value);
   const u = new URL(location.href); u.searchParams.delete('q'); location.href = u.toString();
@@ -130,6 +169,7 @@ function newDream() {
   Object.assign(game.player, fresh.player);
   game.crocs.forEach(resetCroc);
   game.pearls.forEach((p) => { p.taken = false; });
+  resetHazards(game.hazards);
   game.collected = 0; game.wakeups = 0; game.playTime = 0; game.won = false; game.allFound = false;
   game.events.length = 0;
   input.state.yaw = game.player.yaw; input.state.pitch = 0;
@@ -140,13 +180,15 @@ function fmtTime(t) { const m = Math.floor(t / 60), s = Math.floor(t % 60); retu
 function showEnd() {
   const p = game.player;
   $('endTitle').textContent = 'Sen sa splnil';
-  $('endText').textContent = 'Všetkých dvanásť perál je na pláži. Krokodíly ostali v mangrovoch.';
+  $('endText').textContent = `Všetkých ${game.pearls.length} perál je na pláži. Krokodíly ostali v mangrovoch.`;
   $('stats').innerHTML = [
     ['Čas', fmtTime(game.playTime)],
     ['Najvyššia rýchlosť', p.maxSpeed.toFixed(1) + ' m/s'],
     ['Najdlhší let', p.bestFlight.toFixed(1) + ' m'],
+    ['Najvyšší let', p.bestHeight.toFixed(1) + ' m'],
     ['Najdlhšia séria hopov', '×' + p.bestCombo],
     ['Perfektné hopy', String(p.perfects)],
+    ['Bodnutia (trnucha, perutýn)', String(p.stings)],
     ['Prebudenia', String(game.wakeups)],
   ].map((r) => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
   input.unlock();
@@ -160,10 +202,14 @@ function updateHints(dt) {
   const d = p.z - shoreZ(p.x);
   hintT += dt;
   let h = '';
+  const J = input.label('jump'), F = input.label('forward');
   if (game.allFound && !game.won) h = 'Máš všetky perly. Vráť sa na pláž!';
-  else if (p.mode === 'swim' && d < 95) h = input.isTouch ? 'Pozri sa dole a plávaj dopredu = potápanie. ▼ potopiť, HOP vynoriť.' : 'W + pohľad dole = potápanie · C potopiť · Medzerník vynoriť · Shift rýchlejšie';
-  else if (p.mode !== 'swim' && d > 100 && p.depth > 0.12 && Math.hypot(p.vx, p.vz) < 4) h = input.isTouch ? 'Tu sa nedá plávať. Drž HOP a hýb sa – naberieš rýchlosť.' : 'Tu sa nedá plávať. Drž W + Medzerník – bunnyhopom naberieš rýchlosť.';
+  else if (p.poison > 0) h = 'Jed ťa spomaľuje. Daj si pozor, kam stúpaš a čoho sa dotýkaš.';
+  else if (p.mode === 'air' && p.gliding > 0.5) h = 'Plachtíš: pohľad hore = stúpaš (strácaš rýchlosť), pohľad dole = zrýchľuješ.';
+  else if (p.mode === 'swim' && d < 95) h = input.isTouch ? 'Pozri sa dole a plávaj dopredu = potápanie. ▼ potopiť, HOP vynoriť.' : `${F} + pohľad dole = potápanie · ${input.label('dive')} potopiť · ${J} vynoriť · ${input.label('sprint')} rýchlejšie`;
+  else if (p.mode !== 'swim' && d > 100 && p.depth > 0.12 && Math.hypot(p.vx, p.vz) < 4) h = input.isTouch ? 'Tu sa nedá plávať. Drž HOP a hýb sa – naberieš rýchlosť.' : `Tu sa nedá plávať. Drž ${F} + ${J} – bunnyhopom naberieš rýchlosť.`;
   else if (p.mode === 'air' && p.combo >= 3 && p.combo < 9) h = 'Pusť a stlač skok tesne pred dopadom = perfektný hop. Pri rýchlosti drž skok = plachtenie.';
+  else if (d > 0 && d < 30 && p.mode === 'ground' && p.depth > 0.1) h = 'Pozor na trnuchy na dne – modré bodky v piesku.';
   else if (d < 0 && game.collected === 0 && hintT < 40) h = 'Perly svietia modrým lúčom. Prvé sú v lagúne pred tebou.';
   hud.hint(h);
   void hintStage;
@@ -211,6 +257,11 @@ function handleEvents() {
         audio.bite(); fx.hurt = 1; fx.shake = 1;
         hud.toast('Uhryzol ťa!', 1.6, 'bad');
         break;
+      case 'sting':
+        audio.sting(); fx.hurt = 0.7; fx.shake = 0.5;
+        particles.splash(e.x, waterLevelAt(e.x, e.z, game.time), e.z, 2);
+        hud.toast(e.kind === 'ray' ? 'Stúpil si na trnuchu! Jed ťa spomalí.' : 'Popŕhlil ťa perutýn! Jed ťa spomalí.', 2.6, 'bad');
+        break;
       case 'wake':
         audio.wake(); fx.fade = 0;
         input.state.yaw = p.yaw; input.state.pitch = 0;
@@ -224,7 +275,7 @@ function handleEvents() {
 fx.fade = 0;
 
 // ---- frame loop ------------------------------------------------------------------------------------
-const cam = { x: 0, y: 0, z: 0, roll: 0, bob: 0, bobPhase: 0, fov: 74 };
+const cam = { x: 0, y: 0, z: 0, roll: 0, bob: 0, bobPhase: 0, fov: 76 };
 let last = performance.now(), menuT = 0, frames = 0, fpsT = 0, slowT = 0, fastT = 0, uiTime = 0;
 const damp = (cur, target, rate, dt) => cur + (target - cur) * (1 - Math.exp(-rate * dt));
 
@@ -271,11 +322,11 @@ function frame(now) {
     const strafe = (p.vx * Math.cos(p.yaw) - p.vz * Math.sin(p.yaw));
     cam.roll = damp(cam.roll, -strafe * 0.006 - (p.gliding > 0.3 ? strafe * 0.01 : 0), 6, dt);
     camera.rotation.set(input.state.pitch + Math.sin(cam.bobPhase) * 0.004 * cam.bob, input.state.yaw, cam.roll + (Math.random() - 0.5) * fx.shake * 0.03);
-    cam.fov = damp(cam.fov, 74 + Math.min(22, Math.max(0, speed - 6) * 1.7), 5, dt);
+    cam.fov = damp(cam.fov, baseFov + Math.min(24, Math.max(0, speed - 7) * 1.35), 5, dt);
   }
   if (dbg.freeCam) {
     const c = dbg.freeCam;
-    camera.position.set(c.x, c.y, c.z); camera.rotation.set(c.pitch || 0, c.yaw || 0, 0); cam.fov = c.fov || 74;
+    camera.position.set(c.x, c.y, c.z); camera.rotation.set(c.pitch || 0, c.yaw || 0, 0); cam.fov = c.fov || 76;
   }
   if (Math.abs(camera.fov - cam.fov) > 0.01) { camera.fov = cam.fov; camera.updateProjectionMatrix(); }
   camera.updateMatrixWorld();
@@ -293,12 +344,14 @@ function frame(now) {
   f.uHurt.value = fx.hurt;
   f.uDanger.value = state === 'play' ? game.danger : 0;
   f.uFade.value = fx.fade;
-  f.uSpeed.value = damp(f.uSpeed.value, p.mode === 'air' ? Math.min(1, Math.max(0, speed - 9) / 8) : 0, 6, dt);
+  f.uSpeed.value = damp(f.uSpeed.value, p.mode === 'air' ? Math.min(1, Math.max(0, speed - 11) / 10) : 0, 6, dt);
+  f.uPoison.value = damp(f.uPoison.value, state === 'play' && p.poison > 0 ? 1 : 0, 4, dt);
 
   sky.follow(camera.position.x, 0, camera.position.z);
   water.update(camera);
   reef.update(time);
   pearls.update(time, dt);
+  hazardModels.update(time);
   for (let i = 0; i < crocModels.length; i++) {
     const c = game.crocs[i], pc = prev.crocs[i];
     let dy = c.yaw - pc.yaw;
@@ -333,6 +386,7 @@ window.__dbg = dbg;
 
 // compile shaders up front so the first seconds of play do not stutter
 $('start').disabled = true;
+renderBinds();
 requestAnimationFrame((t) => {
   last = t;
   try { renderer.compile(scene, camera); } catch (e) { /* not fatal */ }

@@ -2,7 +2,7 @@
 // the horizon, shaded procedurally (sand, wet sand, mud, reef rock, lawn, desert).
 
 import * as THREE from 'three';
-import { terrainHeight, shoreZ, flatMask, channelMask, lagoonMask, reefD, poolQ } from '../sim/terrain.js';
+import { terrainHeight, shoreZ, flatMask, channelMask, lagoonMask, reefD, poolQ, bommieAt } from '../sim/terrain.js';
 import { POOLS } from '../sim/mapdata.js';
 import { smoothstep } from '../sim/noise.js';
 import { patchMaterial, rippleTexture } from './shared.js';
@@ -20,8 +20,9 @@ function axis(lo, hi, step, farLo, farHi) {
 
 // Cheap height lookup for things that are only drawn (fish, turtles, the
 // crocodiles' render pose): bilinear on the terrain mesh's own samples, so it
-// matches what is on screen. Exact terrainHeight() until the mesh exists.
-export let heightAt = terrainHeight;
+// matches what is on screen (coral rocks included). Exact terrainHeight() until
+// the mesh exists.
+export let heightAt = (x, z) => Math.max(terrainHeight(x, z), bommieAt(x, z));
 // The same samples as a texture, for shaders (shore foam): value = height in
 // metres; `info` maps world x/z to texture coordinates.
 export const heightMap = { texture: null, info: new THREE.Vector4(-480, -330, 2, 1) };
@@ -83,7 +84,10 @@ export function createTerrain(quality) {
       if (!(fx >= 0 && fz >= 0 && fx < NX - 1 && fz < NZ - 1)) return terrainHeight(x, z);
       const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
       const k = ((j + iz0) * nx + i + ix0) * 3 + 1, r = nx * 3;
-      return (pos[k] * (1 - u) + pos[k + 3] * u) * (1 - v) + (pos[k + r] * (1 - u) + pos[k + r + 3] * u) * v;
+      // the two triangles of the cell, split along the same diagonal as the mesh
+      const h00 = pos[k], h10 = pos[k + 3], h01 = pos[k + r], h11 = pos[k + r + 3];
+      const y = u + v <= 1 ? h00 + (h10 - h00) * u + (h01 - h00) * v : h11 + (h01 - h11) * (1 - u) + (h10 - h11) * (1 - v);
+      return Math.max(y, bommieAt(x, z));
     };
   }
   const geo = new THREE.BufferGeometry();

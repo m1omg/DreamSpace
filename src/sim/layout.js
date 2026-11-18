@@ -1,21 +1,24 @@
 // Procedural placement of everything that stands on the map, plus the
 // collision structures built from it. Deterministic (seeded).
 
-import { mulberry32, fbm } from './noise.js';
+import { mulberry32, fbm, hash2 } from './noise.js';
 import {
   BUILDINGS, BLOCKS, HUTS, POOLS, PEARLS, CROC_EXTRA, BOMMIES, LAGOONS, GROVE, VOLLEYBALL,
 } from './mapdata.js';
 import {
   shoreZ, terrainHeight, flatMask, channelMask, lagoonMask, groundAt, reefD, poolQ, ISLETS, setRoofs,
+  setBommies, bommieAt, bommieRadius,
 } from './terrain.js';
 
 export const UNIT_W = 4.5;
+// coral colonies: [radius, height] of each kind at scale 1 (boulder, table, staghorn, sponge)
+export const CORAL_SIZE = [[0.46, 0.58], [0.66, 0.6], [0.34, 0.8], [0.3, 0.85]];
 
 function build() {
   const rnd = mulberry32(20261117);
   const L = {
     units: [], boxes: [], palms: [], bushes: [], umbrellas: [], sunbeds: [], mangroves: [], buoys: [],
-    pearls: [], crocs: [], bommies: [], seagrass: [], reefCorals: [], rays: [], lionfish: [], lamps: [],
+    pearls: [], crocs: [], bommies: [], seagrass: [], reefCorals: [], corals: [], rays: [], lionfish: [], lamps: [],
   };
 
   // --- buildings -------------------------------------------------------------
@@ -78,6 +81,9 @@ function build() {
     const z = b.d + shoreZ(b.x);
     L.bommies.push({ x: b.x, z, y: terrainHeight(b.x, z), r: 3.0 + rnd() * 2.2, seed: (rnd() * 1e9) | 0 });
   }
+  // the rocks are solid ground from here on; nothing may end up inside one
+  setBommies(L.bommies);
+  for (const p of L.pearls) p.y = Math.max(p.y, groundAt(p.x, p.z) + 0.6);
 
   // --- palms ---------------------------------------------------------------------
   const palmOk = (x, z, minD) => {
@@ -209,6 +215,28 @@ function build() {
     if (y > -0.7) continue;
     L.reefCorals.push({ x, z, y, s: 0.5 + rnd() * 1.1, rot: rnd() * 6.283, t: (rnd() * 4) | 0, c: rnd() });
   }
+  // every coral colony, on the rocks and on the reef; the simulation collides
+  // with them and the renderer draws them from the same list
+  for (const b of L.bommies) {
+    const r2 = mulberry32(b.seed);
+    const n = 13 + ((r2() * 7) | 0);
+    for (let i = 0; i < n; i++) {
+      const a = r2() * 6.283, rr = Math.sqrt(r2()) * 0.86 * bommieRadius(b, a);
+      const x = b.x + Math.cos(a) * rr, z = b.z + Math.sin(a) * rr;
+      const t = (r2() * 4) | 0, s = 0.4 + r2() * 0.7, rot = r2() * 6.283, c = r2();
+      L.corals.push({ x, z, y: groundAt(x, z), s, rot, t, c });
+    }
+  }
+  for (const c of L.reefCorals) L.corals.push(c);
+  for (const c of L.corals) {
+    c.sy = c.s * (0.8 + 0.5 * hash2(Math.round(c.x * 37), Math.round(c.z * 53)));
+    // nothing grows out of the water: colonies in the shallows stay small
+    const f = (-0.3 - c.y) / (CORAL_SIZE[c.t][1] * c.sy);
+    if (f < 1) { c.s *= f; c.sy *= f; }
+  }
+  L.corals = L.corals.filter((c) => c.s > 0.3);
+  const inRock = (o) => bommieAt(o.x, o.z) > -1e8;
+  L.seagrass = L.seagrass.filter((g) => !inRock(g));
 
   // --- hazards -------------------------------------------------------------------------------
   // blue-spotted stingrays resting on the bottom where people wade
@@ -231,6 +259,7 @@ function build() {
     if (y > -0.22 || y < -0.7 || !rayOk(x, z) || mgNear(x, z, 1.6)) continue;
     L.rays.push({ x, z, yaw: rnd() * 6.283 });
   }
+  L.rays = L.rays.filter((r) => !inRock(r));
   // lionfish hover around coral
   for (const b of L.bommies) {
     const a = rnd() * 6.283;
@@ -268,6 +297,7 @@ for (const p of LAYOUT.palms) addCircle(p.x, p.z, 0.34 * p.s, p.y + 7 * p.s);
 for (const m of LAYOUT.mangroves) addCircle(m.x, m.z, 0.62 * m.s, m.y + 4.6 * m.s);
 for (const h of HUTS) addCircle(h.x, h.z, h.kind === 'tower' ? h.r : h.r - 0.6, terrainHeight(h.x, h.z) + 5.5);
 for (const u of LAYOUT.umbrellas) addCircle(u.x, u.z, 0.09, u.y + 2.4);
+for (const c of LAYOUT.corals) addCircle(c.x, c.z, CORAL_SIZE[c.t][0] * c.s, c.y + CORAL_SIZE[c.t][1] * c.sy);
 const boxes = LAYOUT.boxes;
 
 // Push the point (pos.x, pos.z) with radius r out of all colliders below

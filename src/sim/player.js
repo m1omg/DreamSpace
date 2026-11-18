@@ -21,10 +21,18 @@ export const PC = {
   SWIM_IN: 1.3, SWIM_OUT: 1.15,
   SWIM_SPEED: 3.9, SWIM_SPRINT: 6.4,
   PERFECT_WINDOW: 0.14,
-  HOP_PERFECT: 3.0, HOP_AUTO: 1.75,
-  GLIDE_MIN: 8, GLIDE_FULL: 15, GLIDE_LIFT: 0.93, GLIDE_DRAG: 0.55,
-  GLIDE_PULL: 1.6,           // how fast a glide can be steered up or down (rad/s at full pitch)
-  GLIDE_CEIL0: 7, GLIDE_CEIL1: 13, // lift fades out between these heights above the ground
+  HOP_PERFECT: 3.0, HOP_AUTO: 1.9,
+  HOP_RISE: 0.035, HOP_RISE_MAX: 8,  // every chained hop jumps a little higher
+  // Flight. Holding jump at speed makes you float; the flight path then follows
+  // the view: look up to climb, look down to dive.
+  GLIDE_MIN: 6.5, GLIDE_FULL: 12.5, GLIDE_LIFT: 0.95, GLIDE_RISE: 0.8, GLIDE_DRAG: 0.3,
+  GLIDE_TURN: 2.3,           // banking towards the view direction (rad/s)
+  GLIDE_PULL: 1.9,           // pulling the flight path up (rad/s)
+  GLIDE_PUSH: 1.5,           // pushing it down
+  GLIDE_DIVE: 0.4,           // share of the lift given up in a dive
+  GLIDE_SAG: 0.07,           // the path settles this far below where you look (rad)
+  GLIDE_EFFORT: 0.22,        // share of the speed that a pull-up costs, per radian
+  GLIDE_CEIL0: 14, GLIDE_CEIL1: 24, // lift fades out between these heights above the ground
   STEP_UP: 0.7,
   BREATH: 45,
   POISON_SLOW: 0.62,
@@ -111,7 +119,7 @@ function doJump(p, depthF, kind, wx, wz, wishLen, events) {
     p.combo = 0;
   }
   p.hops++;
-  p.vy = PC.JUMP_V * (1 - 0.3 * depthF) * (p.poison > 0 ? 0.85 : 1);
+  p.vy = PC.JUMP_V * (1 + PC.HOP_RISE * Math.min(p.combo, PC.HOP_RISE_MAX)) * (1 - 0.3 * depthF) * (p.poison > 0 ? 0.85 : 1);
   p.mode = 'air';
   p.airTime = 0;
   p.flightDist = 0;
@@ -186,34 +194,58 @@ export function stepPlayer(p, input, dt, time, events) {
     p.airTime += dt;
     // air strafing
     if (wishLen > 1e-4) accelerate(p, wx, wz, PC.AIR_CAP, PC.AIR_RATE, dt);
-    // glide: at speed, holding jump turns the body into a wing
+    // flight: at speed, holding jump turns the body into a wing
     let sp = Math.hypot(p.vx, p.vz);
     let lift = 0;
     const above = p.feetY - Math.max(ground, surf);
-    if (input.jump && sp > PC.GLIDE_MIN && p.airTime > 0.12) {
-      const frac = clamp((sp - PC.GLIDE_MIN) / (PC.GLIDE_FULL - PC.GLIDE_MIN), 0, 1);
-      lift = PC.GLIDE_LIFT * frac * (1 - smoothstep(PC.GLIDE_CEIL0, PC.GLIDE_CEIL1, above));
-      const k = lift / PC.GLIDE_LIFT;
+    const up = smoothstep(0.04, 0.3, p.pitch), dn = smoothstep(0.1, 0.42, -p.pitch);
+    // the wing works on air speed; in a deliberate climb that includes the climb itself
+    const airSp = sp + (Math.hypot(sp, p.vy) - sp) * up;
+    if (input.jump && airSp > PC.GLIDE_MIN && p.airTime > 0.12 && sp > 1) {
+      const frac = clamp((airSp - PC.GLIDE_MIN) / (PC.GLIDE_FULL - PC.GLIDE_MIN), 0, 1);
+      const k = frac * (1 - smoothstep(PC.GLIDE_CEIL0, PC.GLIDE_CEIL1, above));
+      lift = PC.GLIDE_LIFT * k;
       // bank towards the view direction
       const fx = -sy, fz = -cy;
       const cross = (p.vx * fz - p.vz * fx) / sp, dot = (p.vx * fx + p.vz * fz) / sp;
-      const turn = clamp(Math.atan2(cross, dot), -1.7 * dt, 1.7 * dt) * k;
+      const turn = clamp(Math.atan2(cross, dot), -PC.GLIDE_TURN * dt, PC.GLIDE_TURN * dt) * k;
       const ct = Math.cos(turn), st = Math.sin(turn);
       const nvx = p.vx * ct - p.vz * st, nvz = p.vx * st + p.vz * ct;
       p.vx = nvx; p.vz = nvz;
-      // pull up / push down: rotate the velocity in the vertical plane, which
-      // trades speed for height (and back) the way a real glide does
-      const want = Math.sin(p.pitch);
-      const w = PC.GLIDE_PULL * want * k * dt;
-      if (w !== 0) {
-        const nvh = sp * Math.cos(w) - p.vy * Math.sin(w);
-        const nvy = sp * Math.sin(w) + p.vy * Math.cos(w);
-        if (nvh > 1) { p.vx *= nvh / sp; p.vz *= nvh / sp; p.vy = nvy; sp = nvh; }
+      // The flight path follows the view. Looking up swings the velocity
+      // upwards: speed turns into height, and the effort costs some more.
+      // Looking down past the top of the arc swings it into a dive that a
+      // later pull-up turns back into speed.
+      const gamma = Math.atan2(p.vy, sp);
+      const want = clamp(p.pitch, -1.15, 1.0);
+      if (up > 0 && want - PC.GLIDE_SAG > gamma) {
+        const w = Math.min(want - PC.GLIDE_SAG - gamma, PC.GLIDE_PULL * k * up * dt);
+        const e = 1 - PC.GLIDE_EFFORT * w;
+        const nvh = (sp * Math.cos(w) - p.vy * Math.sin(w)) * e;
+        if (nvh > 1) {
+          p.vy = (sp * Math.sin(w) + p.vy * Math.cos(w)) * e;
+          p.vx *= nvh / sp; p.vz *= nvh / sp; sp = nvh;
+        }
+      } else if (dn > 0 && want < gamma) {
+        const w = Math.min(gamma - want, PC.GLIDE_PUSH * k * dn * dt);
+        if (p.vy > 0) {
+          // still rising from the hop: this only cuts the climb short
+          p.vy = Math.max(0, p.vy - sp * w);
+        } else {
+          const nvh = sp * Math.cos(w) + p.vy * Math.sin(w);
+          if (nvh > 1) {
+            p.vy = -sp * Math.sin(w) + p.vy * Math.cos(w);
+            p.vx *= nvh / sp; p.vz *= nvh / sp; sp = nvh;
+          }
+        }
       }
       // drag
       const ns = Math.max(0, sp - PC.GLIDE_DRAG * k * dt) / sp;
       p.vx *= ns; p.vz *= ns;
-      if (p.vy > 0) lift *= 0.75;
+      // a hop still has to come down: less lift on the way up unless you pull
+      // up on purpose, and less in a dive, which is what makes a dive fast
+      if (p.vy > 0) lift *= PC.GLIDE_RISE + (1 - PC.GLIDE_RISE) * up;
+      else lift *= 1 - PC.GLIDE_DIVE * dn;
     }
     p.gliding += ((lift > 0.15 ? 1 : 0) - p.gliding) * (1 - Math.exp(-8 * dt));
     p.vy -= PC.GRAVITY * (1 - lift) * dt;

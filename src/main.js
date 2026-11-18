@@ -399,9 +399,12 @@ function frame(now) {
     const bobY = Math.sin(cam.bobPhase * 2) * 0.035 * cam.bob - fx.dip;
     const swimBob = p.mode === 'swim' && !p.underwater ? Math.sin(uiTime * 2.2) * 0.02 : 0;
     const sx = (Math.random() - 0.5) * fx.shake * 0.12, sy = (Math.random() - 0.5) * fx.shake * 0.12;
-    camera.position.set(ex + sx, ey0 + bobY + swimBob + sy, ez);
+    // in flight the view floats a little and banks into turns
+    const floatY = Math.sin(uiTime * 1.9) * 0.035 * p.gliding;
+    camera.position.set(ex + sx, ey0 + bobY + swimBob + floatY + sy, ez);
     const strafe = (p.vx * Math.cos(p.yaw) - p.vz * Math.sin(p.yaw));
-    cam.roll = damp(cam.roll, -strafe * 0.006 - (p.gliding > 0.3 ? strafe * 0.01 : 0), 6, dt);
+    const bank = Math.max(-0.3, Math.min(0.3, strafe * 0.035)) * p.gliding;
+    cam.roll = damp(cam.roll, -strafe * 0.006 * (1 - p.gliding) + bank, 5, dt);
     camera.rotation.set(input.state.pitch + Math.sin(cam.bobPhase) * 0.004 * cam.bob, input.state.yaw, cam.roll + (Math.random() - 0.5) * fx.shake * 0.03);
     cam.fov = damp(cam.fov, baseFov + Math.min(24, Math.max(0, speed - 7) * 1.35), 5, dt);
   }
@@ -425,7 +428,7 @@ function frame(now) {
   f.uHurt.value = fx.hurt;
   f.uDanger.value = running ? game.danger : 0;
   f.uFade.value = fx.fade;
-  f.uSpeed.value = damp(f.uSpeed.value, p.mode === 'air' ? Math.min(1, Math.max(0, speed - 11) / 10) : 0, 6, dt);
+  f.uSpeed.value = damp(f.uSpeed.value, p.mode === 'air' ? Math.min(1, Math.max(0, Math.hypot(speed, p.vy) - 11 + 3 * p.gliding) / 10) : 0, 6, dt);
   f.uPoison.value = damp(f.uPoison.value, running && p.poison > 0 ? 1 : 0, 4, dt);
 
   // what is in view decides what gets drawn this frame

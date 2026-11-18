@@ -2,8 +2,8 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { LAYOUT } from '../sim/layout.js';
-import { terrainHeight, shoreZ } from '../sim/terrain.js';
+import { LAYOUT, CORAL_SIZE } from '../sim/layout.js';
+import { terrainHeight, shoreZ, bommieSurface, bommieRadius } from '../sim/terrain.js';
 import { mulberry32, vnoise } from '../sim/noise.js';
 import { patchMaterial } from './shared.js';
 import { heightAt } from './terrainMesh.js';
@@ -63,22 +63,61 @@ function coralGeometries(lo = false) {
   return [clean(boulder), table, stag, sponge];
 }
 
+// radius of the part of each kind of colony that touches the ground, at scale 1
+const FOOT = [0.42, 0.16, 0.24, 0.28];
+const UP = new THREE.Vector3(0, 1, 0), N = new THREE.Vector3(), QA = new THREE.Quaternion();
+
+// Seat a colony on what is actually drawn under it: lean it with the slope and
+// sink its foot, so that nothing hangs in the water on the steep reef wall.
+function seat(c, rnd) {
+  const e = Math.max(0.3, CORAL_SIZE[c.t][0] * c.s);
+  const h0 = heightAt(c.x, c.z);
+  const hx0 = heightAt(c.x - e, c.z), hx1 = heightAt(c.x + e, c.z), hz0 = heightAt(c.x, c.z - e), hz1 = heightAt(c.x, c.z + e);
+  const gx = (hx1 - hx0) / (2 * e), gz = (hz1 - hz0) / (2 * e), g = Math.hypot(gx, gz);
+  const slope = Math.atan(g), tilt = Math.min(slope * 0.85, 0.95);
+  N.set(g > 1e-5 ? -gx / g * Math.sin(tilt) : 0, Math.cos(tilt), g > 1e-5 ? -gz / g * Math.sin(tilt) : 0);
+  N.x += (rnd() - 0.5) * 0.16; N.z += (rnd() - 0.5) * 0.16; N.normalize();
+  QA.setFromUnitVectors(UP, N);
+  Q.setFromAxisAngle(UP, c.rot).premultiply(QA);
+  // on a bump the middle is higher than the ground around it
+  const y = Math.min(h0, (hx0 + hx1) / 2, (hz0 + hz1) / 2)
+    - 0.04 - 0.07 * c.s - Math.tan(slope - tilt + 0.1) * FOOT[c.t] * c.s;
+  return new THREE.Matrix4().compose(V.set(c.x, y, c.z), Q, S.set(c.s, c.sy, c.s));
+}
+
+// A coral rock: a disc of rings draped over the simulation's own height
+// function, so the picture and the collision are the same shape.
+function rockGeometry(b, NR, NS) {
+  const pos = [b.x, bommieSurface(b, b.x, b.z), b.z], idx = [];
+  for (let i = 1; i <= NR + 1; i++) {
+    const q = i > NR ? 1 : 1 - Math.pow(1 - i / NR, 1.8); // rings crowd towards the steep rim
+    for (let j = 0; j < NS; j++) {
+      const a = (j / NS) * Math.PI * 2, R = bommieRadius(b, a) * q;
+      const x = b.x + Math.cos(a) * R, z = b.z + Math.sin(a) * R;
+      // the last ring is a skirt going down into the sea bed
+      pos.push(x, i > NR ? b.base - 2.2 : i === NR ? b.base : bommieSurface(b, x, z), z);
+    }
+  }
+  for (let j = 0; j < NS; j++) idx.push(0, 1 + (j + 1) % NS, 1 + j);
+  for (let i = 0; i < NR; i++) {
+    for (let j = 0; j < NS; j++) {
+      const A = 1 + i * NS + j, B = 1 + i * NS + (j + 1) % NS, C = A + NS, D = B + NS;
+      idx.push(A, B, C, B, D, C);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  g.computeBoundingSphere();
+  return g;
+}
+
 export function createReef(scene, quality) {
   const rnd = mulberry32(999);
   const geos = coralGeometries(), geosLo = coralGeometries(true);
   const items = [[], [], [], []];
-  // corals on the lagoon bommies
-  for (const b of LAYOUT.bommies) {
-    const r2 = mulberry32(b.seed);
-    const n = 11 + ((r2() * 6) | 0);
-    for (let i = 0; i < n; i++) {
-      const a = r2() * 6.283, rr = Math.sqrt(r2()) * b.r * 0.95;
-      const x = b.x + Math.cos(a) * rr, z = b.z + Math.sin(a) * rr;
-      const top = b.y + b.r * 0.42 * Math.sqrt(Math.max(0, 1 - (rr / b.r) ** 2)) - 0.08;
-      items[(r2() * 4) | 0].push({ x, y: Math.max(top, terrainHeight(x, z) - 0.05), z, s: 0.45 + r2() * 0.8, rot: r2() * 6.283, c: r2() });
-    }
-  }
-  for (const c of LAYOUT.reefCorals) items[c.t].push({ x: c.x, y: c.y - 0.06, z: c.z, s: c.s, rot: c.rot, c: c.c });
+  for (const c of LAYOUT.corals) items[c.t].push(c);
 
   const coralMat = patchMaterial(new THREE.MeshStandardMaterial({ roughness: 0.75, side: THREE.DoubleSide }), {
     key: 'coral',
@@ -94,9 +133,7 @@ diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb*1.5 + 0.08, smoothstep
   items.forEach((list, t) => {
     if (!list.length) return;
     const inst = list.map((c) => {
-      E.set((rnd() - 0.5) * 0.3, c.rot, (rnd() - 0.5) * 0.3, 'XYZ');
-      Q.setFromEuler(E);
-      const matrix = new THREE.Matrix4().compose(V.set(c.x, c.y, c.z), Q, S.set(c.s, c.s * (0.8 + rnd() * 0.5), c.s));
+      const matrix = seat(c, rnd);
       const p = PALETTE[(c.c * PALETTE.length) | 0];
       return { matrix, color: new THREE.Color(p[0], p[1], p[2]).multiplyScalar(0.75 + rnd() * 0.35) };
     });
@@ -109,9 +146,8 @@ diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb*1.5 + 0.08, smoothstep
     });
   });
 
-  // bommie rocks
+  // coral rocks
   {
-    const g = lumpy(new THREE.IcosahedronGeometry(1, 5), 0.28, 2.2, 5);
     const rockMat = patchMaterial(new THREE.MeshStandardMaterial({ color: 0x8c7f6a, roughness: 0.95 }), {
       key: 'rock',
       color: `float e = smoothstep(0.55, 0.8, vnoise(vWPos.xz*1.7 + vWPos.y*2.0));
@@ -119,14 +155,12 @@ diffuseColor.rgb = mix(diffuseColor.rgb*(0.7 + 0.5*vnoise(vWPos.xz*3.0)), mix(ve
 diffuseColor.rgb *= 0.8 + 0.4*vnoise(vWPos.xz*9.0 + vWPos.y*7.0);`,
       bump: 'bumpH = (fbm(vWPos.xz*4.0 + vWPos.y*3.0)*0.7 + vnoise(vWPos.xz*30.0 + vWPos.y*24.0)*0.3) * 0.08;',
     });
-    const im = new THREE.InstancedMesh(g, rockMat, LAYOUT.bommies.length);
-    LAYOUT.bommies.forEach((b, i) => {
-      E.set(0, b.seed % 6, 0); Q.setFromEuler(E);
-      M4.compose(V.set(b.x, b.y - b.r * 0.12, b.z), Q, S.set(b.r, b.r * 0.5, b.r));
-      im.setMatrixAt(i, M4);
-    });
-    im.frustumCulled = false; im.receiveShadow = true; im.castShadow = true;
-    scene.add(im);
+    const lo = quality === 'low';
+    for (const b of LAYOUT.bommies) {
+      const rock = new THREE.Mesh(rockGeometry(b, lo ? 9 : 13, lo ? 28 : 40), rockMat);
+      rock.receiveShadow = true; rock.castShadow = true;
+      scene.add(rock);
+    }
   }
 
   const fish = createFish(scene, quality);
@@ -161,8 +195,9 @@ function createFish(scene, quality) {
   const schools = [];
   const rnd = mulberry32(2024);
   LAYOUT.bommies.forEach((b, i) => {
-    schools.push({ x: b.x, z: b.z, y: b.y + b.r * 0.45 + 0.7, sp: SPECIES[i % 2 === 0 ? 0 : 1 + (i % 4)], range: b.r + 2.5, ph: rnd() * 10 });
-    if (i % 3 === 0) schools.push({ x: b.x, z: b.z, y: b.y + b.r * 0.4 + 1.2, sp: SPECIES[3], range: b.r + 5, ph: rnd() * 10 });
+    const top = b.base + b.h;
+    schools.push({ x: b.x, z: b.z, y: Math.min(-0.8, top + 0.6), sp: SPECIES[i % 2 === 0 ? 0 : 1 + (i % 4)], range: b.r + 2.5, ph: rnd() * 10 });
+    if (i % 3 === 0) schools.push({ x: b.x, z: b.z, y: Math.min(-0.7, top + 1.1), sp: SPECIES[3], range: b.r + 5, ph: rnd() * 10 });
   });
   for (let i = 0; i < 9; i++) {
     const x = -300 + i * 75 + rnd() * 30, z = shoreZ(x) + 244 + rnd() * 10;

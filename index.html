@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>DreamSpace – Lagúna pri Červenom mori</title>
+<meta name="description" content="3D hra v prehliadači: lagúna pri rezorte na brehu Červeného mora · A 3D browser game: a lagoon at a Red Sea resort">
+<meta name="theme-color" content="#04222c">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230b6e7f'/%3E%3Ccircle cx='32' cy='30' r='12' fill='%23eaffff'/%3E%3Cpath d='M6 44q13-8 26 0t26 0v14H6z' fill='%2305323d'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three/build/three.module.min.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+<!-- the text is applied before the 3D engine has finished loading -->
+<script type="module" src="./src/i18n.js"></script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud">
+  <div class="panel tl">
+    <div class="pearl-row"><span class="pearl-ico"></span><span id="pearls">0 / 15</span></div>
+    <div class="bar-row"><span class="lbl" data-i18n="hud.health">Zdravie</span><div class="bar"><i id="hpFill" class="hp"></i></div></div>
+    <div class="bar-row" id="o2Row"><span class="lbl" data-i18n="hud.breath">Dych</span><div class="bar"><i id="o2Fill" class="o2"></i></div></div>
+    <div id="mode" class="mode"></div>
+  </div>
+  <canvas id="minimap" class="tr"></canvas>
+  <div id="dangerTxt" data-i18n="hud.danger">KROKODÍL ŤA LOVÍ – SKÁČ!</div>
+  <div id="poisonTxt" class="poison" data-i18n="hud.poison">OTRAVA – SPOMAĽUJE ŤA</div>
+  <div class="speed">
+    <div id="combo" class="combo"></div>
+    <div class="speed-num"><span id="speedVal">0.0</span><small> m/s</small></div>
+    <div class="bar wide"><i id="speedFill"></i><b class="mark" data-i18n-title="hud.crocSpeed"></b></div>
+  </div>
+  <div id="toast" class="toast"></div>
+  <div id="hint"></div>
+  <div class="cross"></div>
+</div>
+
+<div id="touch">
+  <div id="tzone"></div>
+  <div id="stick"><i id="knob"></i></div>
+  <button id="tJump">HOP</button>
+  <button id="tDive">▼</button>
+  <button id="tPause">II</button>
+</div>
+
+<div id="reveal" aria-live="polite">
+  <p class="r1"></p>
+  <p class="r2"></p>
+  <p class="r3"></p>
+</div>
+
+<div id="menu" class="overlay on">
+  <div class="card">
+    <div class="lang" role="group" data-i18n-aria="menu.lang">
+      <button type="button" data-lang="sk">SK</button><button type="button" data-lang="en">EN</button>
+    </div>
+    <h1>DREAMSPACE</h1>
+    <h2 data-i18n="menu.sub">Lagúna pri Červenom mori</h2>
+    <p id="story" data-i18n="menu.story"></p>
+    <p class="goal" id="goal" data-i18n-html="menu.goal" data-vars='{"n":15}'></p>
+    <div class="cols">
+      <div>
+        <h3 data-i18n="menu.controls">Ovládanie</h3>
+        <ul class="keys" id="keyList"></ul>
+      </div>
+      <div>
+        <h3 data-i18n="menu.moves">Bunnyhop</h3>
+        <ul>
+          <li data-i18n-html="menu.tip1"></li>
+          <li data-i18n-html="menu.tip2"></li>
+          <li data-i18n-html="menu.tip3"></li>
+          <li data-i18n-html="menu.tip4"></li>
+        </ul>
+      </div>
+    </div>
+    <details id="settings">
+      <summary data-i18n="menu.settings">Nastavenia a klávesy</summary>
+      <div class="opts">
+        <label><span data-i18n="menu.quality">Kvalita</span>
+          <select id="quality">
+            <option value="low" data-i18n="q.low">Nízka</option>
+            <option value="medium" data-i18n="q.medium">Stredná</option>
+            <option value="high" data-i18n="q.high">Vysoká</option>
+          </select>
+        </label>
+        <label><span data-i18n="menu.sens">Citlivosť myši</span> <input id="sens" type="range" min="0.3" max="2.5" step="0.05" value="1"></label>
+        <label><span data-i18n="menu.fov">Zorné pole</span> <input id="fov" type="range" min="60" max="100" step="1" value="76"><span id="fovVal">76°</span></label>
+        <label><input id="invertY" type="checkbox"> <span data-i18n="menu.invert">Obrátiť os Y</span></label>
+      </div>
+      <table id="binds"></table>
+      <p class="fine"><span data-i18n="menu.bindHelp"></span>
+        <button id="bindReset" class="mini" data-i18n="menu.bindReset">Obnoviť predvolené</button></p>
+    </details>
+    <button id="start" class="go" data-i18n="menu.play">Hrať</button>
+    <p class="fine" id="loadMsg" data-i18n="menu.loading">Načítavam…</p>
+  </div>
+</div>
+
+<div id="end" class="overlay">
+  <div class="card small">
+    <h1 id="endTitle"></h1>
+    <p id="endText"></p>
+    <table id="stats"></table>
+    <button id="again" class="go" data-i18n="end.again">Snívať ďalej</button>
+    <button id="restart" class="go ghost" data-i18n="end.restart">Nový sen</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

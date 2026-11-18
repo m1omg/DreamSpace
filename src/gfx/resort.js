@@ -4,11 +4,13 @@
 // the hexagonal pavilion, beach bars, three rows of umbrellas.
 
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { BUILDINGS, HUTS, POOLS, VOLLEYBALL } from '../sim/mapdata.js';
 import { LAYOUT, UNIT_W } from '../sim/layout.js';
 import { terrainHeight, shoreZ, poolOutline } from '../sim/terrain.js';
 import { patchMaterial, canvasTexture, detailTextures } from './shared.js';
+import { createPool, trs } from './instancing.js';
+import { t, onLangChange } from '../i18n.js';
 
 // material ids for the detail shader
 const M = { PLASTER: 0, STONE: 1, PAVING: 2, WOOD: 3, THATCH: 4, GLASS: 5, PAINT: 6, TILE: 7 };
@@ -35,21 +37,33 @@ const C = {
   lamp: new THREE.Color(0.15, 0.13, 0.12),
 };
 
-function prep(g, color, mat) {
+// Every part carries its colour, a material id for the detail shader, an
+// ambient-occlusion factor and its height above the building's base (walls
+// get darker where they meet the ground). `ao` is a number or a function of
+// the face normal; floors and `flat` parts (paving lying on the ground) get
+// no ground band.
+function prep(g, color, mat, ao = 1, flat = false) {
   const n = g.index ? g.toNonIndexed() : g;
   n.deleteAttribute('uv');
   const count = n.attributes.position.count;
-  const c = new Float32Array(count * 3), m = new Float32Array(count);
-  for (let i = 0; i < count; i++) { c[i * 3] = color.r; c[i * 3 + 1] = color.g; c[i * 3 + 2] = color.b; m[i] = mat; }
+  const P = n.attributes.position, N = n.attributes.normal;
+  const c = new Float32Array(count * 3), m = new Float32Array(count), o = new Float32Array(count), h = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    c[i * 3] = color.r; c[i * 3 + 1] = color.g; c[i * 3 + 2] = color.b; m[i] = mat;
+    o[i] = typeof ao === 'function' ? ao(N.getX(i), N.getY(i), N.getZ(i)) : ao;
+    h[i] = flat || Math.abs(N.getY(i)) > 0.7 ? 9 : P.getY(i); // the band is for walls, not floors
+  }
   n.setAttribute('color', new THREE.BufferAttribute(c, 3));
   n.setAttribute('aMat', new THREE.BufferAttribute(m, 1));
+  n.setAttribute('aAO', new THREE.BufferAttribute(o, 1));
+  n.setAttribute('aH', new THREE.BufferAttribute(h, 1));
   return n;
 }
-function box(w, h, d, color, mat, x, y, z, ry = 0) {
+function box(w, h, d, color, mat, x, y, z, ry = 0, ao = 1, flat = false) {
   const g = new THREE.BoxGeometry(w, h, d);
   if (ry) g.rotateY(ry);
   g.translate(x, y + h / 2, z);
-  return prep(g, color, mat);
+  return prep(g, color, mat, ao, flat);
 }
 function dome(r, color, x, y, z, squash = 1, seg = 22) {
   const g = new THREE.SphereGeometry(r, seg, Math.round(seg / 2), 0, Math.PI * 2, 0, Math.PI / 2);
@@ -63,7 +77,7 @@ function cyl(rt, rb, h, color, mat, x, y, z, seg = 14, open = false) {
   return prep(g, color, mat);
 }
 // A wall panel with an arched opening, standing in the xy plane.
-function archPanel(w, h, aw, spring, thick, color, mat = M.PLASTER) {
+function archPanel(w, h, aw, spring, thick, color, mat = M.PLASTER, curveSegments = 9) {
   const s = new THREE.Shape();
   s.moveTo(-w / 2, 0); s.lineTo(w / 2, 0); s.lineTo(w / 2, h); s.lineTo(-w / 2, h); s.closePath();
   const hole = new THREE.Path();
@@ -71,7 +85,7 @@ function archPanel(w, h, aw, spring, thick, color, mat = M.PLASTER) {
   hole.absarc(0, spring, aw / 2, Math.PI, 0, true);
   hole.lineTo(aw / 2, 0.001); hole.closePath();
   s.holes.push(hole);
-  const g = new THREE.ExtrudeGeometry(s, { depth: thick, bevelEnabled: false, curveSegments: 9 });
+  const g = new THREE.ExtrudeGeometry(s, { depth: thick, bevelEnabled: false, curveSegments });
   g.translate(0, 0, -thick / 2);
   return prep(g, color, mat);
 }
@@ -79,63 +93,73 @@ function moved(g, x, y, z, ry = 0) {
   const c = g.clone();
   if (ry) c.rotateY(ry);
   c.translate(x, y, z);
+  if (y) { const h = c.attributes.aH.array; for (let i = 0; i < h.length; i++) h[i] += y; }
   return c;
 }
 
 // ---- room unit: one bay of a two-storey block ----------------------------------
-function roomUnitGeometry() {
-  const W = UNIT_W, CORE = 7.0, LOG = 2.1, H = 6.9, F2 = 3.42;
+// `lo` is the distant version: coarser curves, no window frames or balusters.
+function roomUnitGeometry(lo = false) {
+  const W = UNIT_W, CORE = 7.0, LOG = 2.1, H = 6.9, F2 = 3.42, T = 0.36;
+  const IN = LOG - T; // depth of the loggia behind the arched front
   const parts = [];
-  parts.push(box(W, H + 1.4, CORE, C.terra, M.PLASTER, 0, -1.4, 0));
+  // the core; its front and back faces are the shaded walls inside the loggias
+  parts.push(box(W, H + 1.4, CORE, C.terra, M.PLASTER, 0, -1.4, 0, 0, (nx, ny, nz) => (Math.abs(nz) > 0.5 ? 0.72 : 1)));
   // dome on a low drum
-  parts.push(cyl(1.75, 1.85, 0.32, C.terra2, M.PLASTER, 0, H, 0, 20));
-  parts.push(dome(1.68, C.dome, 0, H + 0.3, 0, 0.78));
-  const lower = archPanel(W, F2, 3.1, 1.25, 0.36, C.terra2);
-  const upper = archPanel(W, H - F2, 3.1, 1.2, 0.36, C.terra2);
+  parts.push(cyl(1.75, 1.85, 0.32, C.terra2, M.PLASTER, 0, H, 0, lo ? 10 : 20));
+  parts.push(dome(1.68, C.dome, 0, H + 0.3, 0, 0.78, lo ? 10 : 22));
+  const lower = archPanel(W, F2, 3.1, 1.25, T, C.terra2, M.PLASTER, lo ? 3 : 9);
+  const upper = archPanel(W, H - F2, 3.1, 1.2, T, C.terra2, M.PLASTER, lo ? 3 : 9);
   for (const s of [-1, 1]) {
-    const zf = s * (CORE / 2 + LOG);
-    parts.push(moved(lower, 0, 0, zf - s * 0.18));
-    parts.push(moved(upper, 0, F2, zf - s * 0.18));
-    // loggia floors and the fin walls between neighbours
-    parts.push(box(W, 0.2, LOG, C.stone, M.PAVING, 0, -0.12, s * (CORE / 2 + LOG / 2)));
-    parts.push(box(W, 0.2, LOG, C.terraDark, M.PLASTER, 0, F2 - 0.2, s * (CORE / 2 + LOG / 2)));
-    for (const sx of [-1, 1]) parts.push(box(0.28, H + 1.4, LOG, C.terra, M.PLASTER, sx * (W / 2 - 0.14), -1.4, s * (CORE / 2 + LOG / 2)));
+    const zf = s * (CORE / 2 + LOG), zc = s * (CORE / 2 + IN / 2);
+    parts.push(moved(lower, 0, 0, zf - s * T / 2));
+    parts.push(moved(upper, 0, F2, zf - s * T / 2));
+    // Loggia floors and the fin walls between neighbours end at the back of
+    // the arched front and inside the fins: faces lying flush on the facade
+    // used to z-fight with it and flicker.
+    parts.push(box(W - 0.56, 0.2, IN, C.stone, M.PAVING, 0, -0.12, zc, 0, (nx, ny) => (ny > 0.5 ? 0.8 : 1)));
+    parts.push(box(W - 0.56, 0.2, IN, C.terraDark, M.PLASTER, 0, F2 - 0.2, zc, 0, (nx, ny) => (ny < -0.5 ? 0.55 : ny > 0.5 ? 0.8 : 1)));
+    for (const sx of [-1, 1]) parts.push(box(0.28, H + 1.4, IN, C.terra, M.PLASTER, sx * (W / 2 - 0.14), -1.4, zc, 0, (nx) => (Math.abs(nx) > 0.5 ? 0.8 : 1)));
     // stepped parapet
     parts.push(box(W, 0.42, 0.4, C.terra2, M.PLASTER, 0, H, zf - s * 0.18));
     for (const sx of [-1, 1]) parts.push(box(0.5, 0.36, 0.44, C.terra2, M.PLASTER, sx * (W / 2 - 0.25), H + 0.42, zf - s * 0.18));
     // doors and windows on the recessed wall, both floors
     for (const fy of [0.02, F2 + 0.02]) {
-      parts.push(box(1.05, 2.15, 0.07, C.wood, M.WOOD, -0.95, fy, s * (CORE / 2 + 0.03)));
-      parts.push(box(1.5, 1.35, 0.06, C.glass, M.GLASS, 0.75, fy + 0.8, s * (CORE / 2 + 0.03)));
-      parts.push(box(1.66, 0.09, 0.1, C.wood, M.WOOD, 0.75, fy + 2.15, s * (CORE / 2 + 0.03)));
-      parts.push(box(1.66, 0.09, 0.1, C.wood, M.WOOD, 0.75, fy + 0.72, s * (CORE / 2 + 0.03)));
+      parts.push(box(1.05, 2.15, 0.07, C.wood, M.WOOD, -0.95, fy, s * (CORE / 2 + 0.03), 0, 0.75));
+      parts.push(box(1.5, 1.35, 0.06, C.glass, M.GLASS, 0.75, fy + 0.8, s * (CORE / 2 + 0.03), 0, 0.75));
+      if (!lo) {
+        parts.push(box(1.66, 0.09, 0.1, C.wood, M.WOOD, 0.75, fy + 2.15, s * (CORE / 2 + 0.03), 0, 0.75));
+        parts.push(box(1.66, 0.09, 0.1, C.wood, M.WOOD, 0.75, fy + 0.72, s * (CORE / 2 + 0.03), 0, 0.75));
+      }
     }
     // turquoise railing upstairs
     const rz = zf - s * 0.2;
     parts.push(box(3.1, 0.07, 0.07, C.teal, M.PAINT, 0, F2 + 0.95, rz));
-    parts.push(box(3.1, 0.06, 0.06, C.teal, M.PAINT, 0, F2 + 0.12, rz));
-    for (let i = -5; i <= 5; i++) parts.push(box(0.045, 0.85, 0.045, C.teal, M.PAINT, i * 0.28, F2 + 0.12, rz));
+    if (!lo) {
+      parts.push(box(3.1, 0.06, 0.06, C.teal, M.PAINT, 0, F2 + 0.12, rz));
+      for (let i = -5; i <= 5; i++) parts.push(box(0.045, 0.85, 0.045, C.teal, M.PAINT, i * 0.28, F2 + 0.12, rz));
+    }
   }
-  return mergeGeometries(parts);
+  return mergeVertices(mergeGeometries(parts));
 }
 
 // ---- bungalow unit: single-storey, stone-clad, salmon dome --------------------------
-function bungalowGeometry() {
+function bungalowGeometry(lo = false) {
   const W = UNIT_W, D = 6.2, H = 3.3;
   const parts = [];
   parts.push(box(W, H + 1.2, D, C.stone, M.STONE, 0, -1.2, 0));
   parts.push(box(W + 0.12, 0.28, D + 0.12, C.terra2, M.PLASTER, 0, H, 0));
-  parts.push(cyl(1.95, 2.0, 0.25, C.dome, M.PLASTER, 0, H + 0.28, 0, 20));
-  parts.push(dome(1.9, C.dome, 0, H + 0.5, 0, 0.72));
+  parts.push(cyl(1.95, 2.0, 0.25, C.dome, M.PLASTER, 0, H + 0.28, 0, lo ? 10 : 20));
+  parts.push(dome(1.9, C.dome, 0, H + 0.5, 0, 0.72, lo ? 10 : 22));
   for (const s of [-1, 1]) {
-    const door = archPanel(1.5, 2.5, 1.05, 1.6, 0.14, C.terra2);
+    const door = archPanel(1.5, 2.5, 1.05, 1.6, 0.14, C.terra2, M.PLASTER, lo ? 3 : 9);
     parts.push(moved(door, -0.8, 0, s * (D / 2 + 0.05)));
-    parts.push(box(1.0, 2.1, 0.06, C.wood, M.WOOD, -0.8, 0, s * (D / 2 + 0.02)));
-    parts.push(box(1.0, 1.0, 0.06, C.glass, M.GLASS, 1.0, 1.05, s * (D / 2 + 0.02)));
-    parts.push(box(1.16, 0.1, 0.1, C.wood, M.WOOD, 1.0, 0.98, s * (D / 2 + 0.03)));
-    parts.push(box(W, 0.14, 1.4, C.stone, M.PAVING, 0, -0.06, s * (D / 2 + 0.7)));
+    parts.push(box(1.0, 2.1, 0.06, C.wood, M.WOOD, -0.8, 0, s * (D / 2 + 0.02), 0, 0.8));
+    parts.push(box(1.0, 1.0, 0.06, C.glass, M.GLASS, 1.0, 1.05, s * (D / 2 + 0.02), 0, 0.85));
+    if (!lo) parts.push(box(1.16, 0.1, 0.1, C.wood, M.WOOD, 1.0, 0.98, s * (D / 2 + 0.03)));
+    parts.push(box(W, 0.14, 1.4, C.stone, M.PAVING, 0, -0.06, s * (D / 2 + 0.7), 0, (nx, ny) => (ny > 0.5 ? 0.85 : 1)));
   }
-  return mergeGeometries(parts);
+  return mergeVertices(mergeGeometries(parts));
 }
 
 // ---- single buildings ---------------------------------------------------------------
@@ -158,7 +182,8 @@ function mainBuilding(b) {
   parts.push(dome(7.0, C.dome, 0, H + 4.9, 0, 0.8, 32));
   parts.push(cyl(0.1, 0.1, 2.0, C.terraDark, M.PAINT, 0, H + 10.4, 0, 6));
   for (const sx of [-1, 1]) {
-    parts.push(box(6.5, H + 2.2, 6.5, C.terra2, M.PLASTER, sx * (L / 2 - 3.25), 0, D / 2 - 2));
+    // the corner wings stand 0.3 m proud: flush side walls used to z-fight
+    parts.push(box(6.8, H + 2.2, 6.5, C.terra2, M.PLASTER, sx * (L / 2 - 3.1), 0, D / 2 - 2));
     parts.push(dome(3.0, C.dome, sx * (L / 2 - 3.25), H + 2.2, D / 2 - 2, 0.8));
     for (let i = 0; i < 4; i++) parts.push(dome(1.7, C.dome, sx * (7 + i * 4.6 + 6), H + 0.5, 0, 0.75));
   }
@@ -171,13 +196,13 @@ function mainBuilding(b) {
     for (const s of [-1, 1]) {
       parts.push(moved(arch, x, 0, s * (D / 2 + 3.4)));
       if (Math.abs(x) > 12) parts.push(moved(arch2, x, 4.9, s * (D / 2 + 0.3)));
-      parts.push(box(3.2, 3.0, 0.08, C.glass, M.GLASS, x, 0.2, s * (D / 2 + 0.05)));
-      parts.push(box(3.4, 0.14, 0.14, C.wood, M.WOOD, x, 3.2, s * (D / 2 + 0.07)));
+      parts.push(box(3.2, 3.0, 0.08, C.glass, M.GLASS, x, 0.2, s * (D / 2 + 0.05), 0, 0.75));
+      parts.push(box(3.4, 0.14, 0.14, C.wood, M.WOOD, x, 3.2, s * (D / 2 + 0.07), 0, 0.75));
     }
   }
   for (const s of [-1, 1]) {
-    parts.push(box(L, 0.4, 3.9, C.terraDark, M.PLASTER, 0, 4.6, s * (D / 2 + 1.9)));
-    parts.push(box(L, 0.16, 3.9, C.stone, M.PAVING, 0, -0.08, s * (D / 2 + 1.9)));
+    parts.push(box(L, 0.4, 3.9, C.terraDark, M.PLASTER, 0, 4.6, s * (D / 2 + 1.9), 0, (nx, ny) => (ny < -0.5 ? 0.55 : 1)));
+    parts.push(box(L, 0.16, 3.9, C.stone, M.PAVING, 0, -0.08, s * (D / 2 + 1.9), 0, (nx, ny) => (ny > 0.5 ? 0.82 : 1)));
     parts.push(box(L, 0.5, 0.4, C.terra2, M.PLASTER, 0, 5.0, s * (D / 2 + 3.4)));
   }
   return place(parts, b);
@@ -212,9 +237,9 @@ function smallBuilding(b) {
   return place(parts, b);
 }
 
-function thatchRoof(r, h, y, seg, color = C.thatch) {
+function thatchRoof(r, h, y, seg, color = C.thatch, rings = 3) {
   const out = [];
-  const cone = new THREE.ConeGeometry(r, h, seg, 3, true);
+  const cone = new THREE.ConeGeometry(r, h, seg, rings, true);
   cone.translate(0, y + h / 2, 0);
   out.push(prep(cone, color, M.THATCH));
   const skirt = new THREE.CylinderGeometry(r, r + 0.12, 0.4, seg, 1, true);
@@ -298,13 +323,13 @@ function buildPools(scene) {
     const deck = new THREE.ShapeGeometry(deckShape, 6);
     deck.rotateX(-Math.PI / 2);
     deck.translate(0, p.deckY, 0);
-    deckParts.push(prep(deck, C.paving, M.PAVING));
+    deckParts.push(prep(deck, C.paving, M.PAVING, 1, true));
     // coping stones
     const rimPts = poolOutline(p, 72, 0.32);
     for (let i = 0; i < 72; i++) {
       const [x0, z0] = rimPts[i], [x1, z1] = rimPts[(i + 1) % 72];
       const len = Math.hypot(x1 - x0, z1 - z0);
-      deckParts.push(box(len + 0.03, 0.07, 0.62, C.white, M.STONE, (x0 + x1) / 2, p.deckY, (z0 + z1) / 2, Math.atan2(-(z1 - z0), x1 - x0)));
+      deckParts.push(box(len + 0.03, 0.07, 0.62, C.white, M.STONE, (x0 + x1) / 2, p.deckY, (z0 + z1) / 2, Math.atan2(-(z1 - z0), x1 - x0), 1, true));
     }
 
     // basin: tiled floor and walls, lit by caustics at this pool's own level
@@ -354,7 +379,7 @@ diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.1,0.32,0.62), step(0.93, hash12(
 }
 
 // A strip of paving draped over the terrain along a polyline.
-function path(points, width, color, mat = M.PAVING, lift = 0.05) {
+function path(points, width, color, mat = M.PAVING, lift = 0.06) {
   const pos = [], idx = [];
   for (let i = 0; i < points.length; i++) {
     const [x, z] = points[i];
@@ -372,7 +397,7 @@ function path(points, width, color, mat = M.PAVING, lift = 0.05) {
   g.computeVertexNormals();
   const na = g.attributes.normal;
   if (na.getY(0) < 0) { g.setIndex(idx.map((_, i) => idx[i - (i % 3) + [0, 2, 1][i % 3]])); g.computeVertexNormals(); }
-  return prep(g, color, mat);
+  return prep(g, color, mat, 1, true);
 }
 function curve(a, b, wobble, n = 14) {
   const pts = [];
@@ -386,18 +411,22 @@ function curve(a, b, wobble, n = 14) {
   return pts;
 }
 
+function drawSign(g, w, h) {
+  const fit = (text, size, maxW) => { g.font = `bold ${size}px sans-serif`; while (g.measureText(text).width > maxW && size > 12) g.font = `bold ${--size}px sans-serif`; };
+  g.fillStyle = '#f3e6c4'; g.fillRect(0, 0, w, h);
+  g.strokeStyle = '#b3261e'; g.lineWidth = 14; g.strokeRect(10, 10, w - 20, h - 20);
+  g.fillStyle = '#b3261e'; g.textAlign = 'center';
+  fit(t('sign.title'), 64, w - 60); g.fillText(t('sign.title'), w / 2, 92);
+  g.fillStyle = '#2b2118';
+  fit(t('sign.l1'), 36, w - 60); g.fillText(t('sign.l1'), w / 2, 156);
+  fit(t('sign.l2'), 36, w - 60); g.fillText(t('sign.l2'), w / 2, 202);
+  g.fillStyle = '#b3261e';
+  fit(t('sign.l3'), 58, w - 60); g.fillText(t('sign.l3'), w / 2, 272);
+}
 function signTexture() {
-  return canvasTexture(512, 320, (g, w, h) => {
-    g.fillStyle = '#f3e6c4'; g.fillRect(0, 0, w, h);
-    g.strokeStyle = '#b3261e'; g.lineWidth = 14; g.strokeRect(10, 10, w - 20, h - 20);
-    g.fillStyle = '#b3261e'; g.textAlign = 'center';
-    g.font = 'bold 64px sans-serif'; g.fillText('⚠ POZOR ⚠', w / 2, 92);
-    g.fillStyle = '#2b2118'; g.font = 'bold 36px sans-serif';
-    g.fillText('Za bójkami je plytčina,', w / 2, 156);
-    g.fillText('mangrovy a', w / 2, 202);
-    g.fillStyle = '#b3261e'; g.font = 'bold 58px sans-serif';
-    g.fillText('KROKODÍLY', w / 2, 272);
-  });
+  const tex = canvasTexture(512, 320, drawSign);
+  onLangChange(() => { drawSign(tex.image.getContext('2d'), 512, 320); tex.needsUpdate = true; });
+  return tex;
 }
 
 export function createResort(scene, quality) {
@@ -405,15 +434,15 @@ export function createResort(scene, quality) {
   const mat = patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 }), {
     key: 'resort',
     uniforms: { tStucco: { value: T.stucco }, tStone: { value: T.stone }, tPaving: { value: T.paving }, tWood: { value: T.wood }, tThatch: { value: T.thatch } },
-    vertexPars: 'attribute float aMat;\nvarying float vMat;\nvarying vec3 vWN;',
-    vertex: `vMat = aMat;
+    vertexPars: 'attribute float aMat;\nattribute float aAO;\nattribute float aH;\nvarying float vMat;\nvarying float vAO;\nvarying float vH;\nvarying vec3 vWN;',
+    vertex: `vMat = aMat; vAO = aAO; vH = aH;
 #ifdef USE_INSTANCING
   vWN = normalize(mat3(instanceMatrix) * normal);
 #else
   vWN = normal;
 #endif`,
     fragmentPars: /* glsl */ `
-varying float vMat; varying vec3 vWN;
+varying float vMat; varying float vAO; varying float vH; varying vec3 vWN;
 uniform sampler2D tStucco, tStone, tPaving, tWood, tThatch;
 float gDetail;
 vec3 tri(sampler2D t, float s){
@@ -426,7 +455,7 @@ vec3 tri(sampler2D t, float s){
   float k = 1.0;
   if (vMat < 0.5) { det = tri(tStucco, 0.42); k = 1.45;
     // rain streaks and sun-bleached patches on the plaster
-    float streak = smoothstep(0.5, 0.9, vnoise(vec2(dot(vWPos.xz, vec2(2.3, 1.9)), vWPos.y*0.22)));
+    float streak = smoothstep(0.5, 0.9, vnoise(vec2(dot(vWPos.xz, vec2(2.3, 1.9)), vWPos.y*0.22))) * aaw(3.0, gFw);
     det *= 1.0 - 0.2*streak; det *= 0.86 + 0.3*fbm(vWPos.xz*0.11 + vWPos.y*0.3);
   }
   else if (vMat < 1.5) { det = tri(tStone, 0.36); k = 1.3; }
@@ -437,7 +466,9 @@ vec3 tri(sampler2D t, float s){
   gDetail = dot(det, vec3(0.333));
   diffuseColor.rgb *= det * k;
 }`,
-    bump: 'bumpH = gDetail * (vMat < 0.5 ? 0.012 : vMat < 2.5 ? 0.04 : vMat < 4.5 ? 0.035 : 0.0);',
+    bump: 'bumpH = gDetail * (vMat < 0.5 ? 0.012 : vMat < 2.5 ? 0.04 : vMat < 4.5 ? 0.035 : 0.0) * aaw(4.0, gFw);',
+    // baked occlusion, plus a darker band where walls meet the ground
+    ao: 'gAO = vAO * mix(0.55, 1.0, smoothstep(-0.3, 1.5, vH));',
     patch(shader) {
       shader.fragmentShader = shader.fragmentShader.replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
 roughnessFactor = (vMat > 4.5 && vMat < 5.5) ? 0.05 : (vMat > 5.5 ? 0.45 : 0.88);`);
@@ -445,26 +476,29 @@ roughnessFactor = (vMat > 4.5 && vMat < 5.5) ? 0.05 : (vMat > 5.5 ? 0.45 : 0.88)
   });
 
   // ---- static geometry ----
-  const parts = [];
+  // `flat`: paving lying on the ground (decks, paths, the court). It is drawn
+  // as a decal with a depth offset, so it never fights with the terrain a few
+  // centimetres below it, however far away it is.
+  const parts = [], flat = [];
   for (const b of BUILDINGS) parts.push(b.kind === 'main' ? mainBuilding(b) : smallBuilding(b));
   for (const h of HUTS) parts.push(hut(h));
-  parts.push(...buildPools(scene));
+  flat.push(...buildPools(scene));
 
   // promenade behind the beach and garden paths between the blocks
   const prom = [];
   for (let x = -270; x <= 235; x += 4) prom.push([x, shoreZ(x) - 30]);
-  parts.push(path(prom, 3.4, C.paving));
+  flat.push(path(prom, 3.4, C.paving));
   const paths = [
     [[52, -31], [50, -50]], [[50, -84], [46, -150]], [[-20, -31], [-24, -100]], [[-90, -31], [-88, -78]],
     [[-88, -104], [-96, -200]], [[40, -68], [8, -62]], [[-22, -64], [-66, -90]], [[4, -31], [2, -42]],
     [[44, -150], [-60, -152]], [[104, -40], [106, -150]], [[-128, -40], [-112, -100]], [[70, -150], [44, -172]],
   ];
-  for (const [a, b] of paths) parts.push(path(curve(a, b, 1.6), 2.3, C.paving));
+  for (const [a, b] of paths) flat.push(path(curve(a, b, 1.6), 2.3, C.paving));
 
   // beach volleyball court
   {
     const v = VOLLEYBALL, y = terrainHeight(v.x, v.z);
-    parts.push(box(v.w, 0.12, v.d, C.sand, M.PAINT, v.x, y - 0.04, v.z));
+    flat.push(box(v.w, 0.12, v.d, C.sand, M.PAINT, v.x, y - 0.04, v.z, 0, 1, true));
     for (const s of [-1, 1]) parts.push(cyl(0.05, 0.05, 2.5, C.white, M.PAINT, v.x, y, v.z + s * (v.d / 2 + 0.3), 8));
     parts.push(box(0.03, 0.9, v.d + 0.6, C.white, M.PAINT, v.x, y + 1.5, v.z));
   }
@@ -478,43 +512,61 @@ roughnessFactor = (vMat > 4.5 && vMat < 5.5) ? 0.05 : (vMat > 5.5 ? 0.45 : 0.88)
   const mesh = new THREE.Mesh(mergeGeometries(parts), mat);
   mesh.castShadow = true; mesh.receiveShadow = true;
   scene.add(mesh);
+  const decalMat = mat.clone();
+  decalMat.onBeforeCompile = mat.onBeforeCompile; decalMat.customProgramCacheKey = mat.customProgramCacheKey;
+  decalMat.polygonOffset = true; decalMat.polygonOffsetFactor = -1; decalMat.polygonOffsetUnits = -4;
+  const decals = new THREE.Mesh(mergeGeometries(flat), decalMat);
+  decals.receiveShadow = true;
+  scene.add(decals);
 
-  // ---- instanced room units ----
-  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v3 = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0);
+  // ---- room units: culled per instance, simpler models far away ----
   for (const kind of ['rooms', 'bungalow']) {
     const list = LAYOUT.units.filter((u) => u.kind === kind);
-    const im = new THREE.InstancedMesh(kind === 'rooms' ? roomUnitGeometry() : bungalowGeometry(), mat, list.length);
-    list.forEach((u, i) => {
-      q.setFromAxisAngle(up, u.rot);
-      m4.compose(v3.set(u.x, u.y, u.z), q, one);
-      im.setMatrixAt(i, m4);
+    const geo = kind === 'rooms' ? roomUnitGeometry : bungalowGeometry;
+    createPool(scene, {
+      name: kind, castShadow: true, margin: 0.3,
+      items: list.map((u) => ({ matrix: trs(u.x, u.y, u.z, u.rot) })),
+      levels: [
+        { maxDist: 60, parts: [{ geometry: geo(), material: mat }] },
+        { maxDist: 5000, parts: [{ geometry: geo(true), material: mat }] },
+      ],
     });
-    im.castShadow = true; im.receiveShadow = true; im.computeBoundingSphere();
-    scene.add(im);
   }
 
   // ---- umbrellas: thatch on a yellow pole ----
   {
-    const pole = cyl(0.05, 0.06, 2.45, C.yellow, M.PAINT, 0, 0, 0, 8);
-    const g = mergeGeometries([pole, ...thatchRoof(1.85, 0.95, 2.25, 20), cyl(0.12, 0.3, 0.2, C.thatchDark, M.THATCH, 0, 3.15, 0, 8)]);
+    const umbrella = (lo) => mergeVertices(mergeGeometries([
+      cyl(0.05, 0.06, 2.45, C.yellow, M.PAINT, 0, 0, 0, lo ? 5 : 8),
+      ...thatchRoof(1.85, 0.95, 2.25, lo ? 9 : 20, C.thatch, lo ? 1 : 3),
+      cyl(0.12, 0.3, 0.2, C.thatchDark, M.THATCH, 0, 3.15, 0, lo ? 5 : 8),
+    ]));
     const umat = mat.clone();
     umat.side = THREE.DoubleSide;
     umat.onBeforeCompile = mat.onBeforeCompile; umat.customProgramCacheKey = () => mat.customProgramCacheKey() + 'ds';
-    const im = new THREE.InstancedMesh(g, umat, LAYOUT.umbrellas.length);
-    LAYOUT.umbrellas.forEach((u, i) => { m4.makeRotationY(u.rot); m4.setPosition(u.x, u.y - 0.1, u.z); im.setMatrixAt(i, m4); });
-    im.castShadow = true; im.receiveShadow = true; im.computeBoundingSphere();
-    scene.add(im);
+    createPool(scene, {
+      name: 'umbrellas', castShadow: true, margin: 0.2,
+      items: LAYOUT.umbrellas.map((u) => ({ matrix: trs(u.x, u.y - 0.1, u.z, u.rot) })),
+      levels: [
+        { maxDist: 50, parts: [{ geometry: umbrella(false), material: umat }] },
+        { maxDist: 900, parts: [{ geometry: umbrella(true), material: umat }] },
+      ],
+    });
   }
   // ---- sunbeds: white frame, blue and white striped mattress ----
   {
-    const P = [];
-    const plain = (g) => { const n = g.toNonIndexed(); n.deleteAttribute('uv'); return n; };
-    const add = (w, h, d, x, y, z, rx = 0) => { const g = new THREE.BoxGeometry(w, h, d); if (rx) g.rotateX(rx); g.translate(x, y, z); P.push(plain(g)); };
-    add(0.7, 0.07, 1.45, 0, 0.33, 0.2); add(0.7, 0.07, 0.78, 0, 0.6, -0.74, 0.72);            // frame
-    add(0.62, 0.09, 1.4, 0, 0.41, 0.2); add(0.62, 0.09, 0.72, 0, 0.67, -0.71, 0.72);          // mattress
-    for (const [x, z] of [[-0.3, 0.82], [0.3, 0.82], [-0.3, -0.3], [0.3, -0.3]]) add(0.06, 0.3, 0.06, x, 0.15, z);
-    for (const x of [-0.32, 0.32]) add(0.05, 0.06, 1.5, x, 0.27, 0.2);
-    const g = mergeGeometries(P);
+    const bed = (lo) => {
+      const P = [];
+      const plain = (g) => { const n = g.toNonIndexed(); n.deleteAttribute('uv'); return n; };
+      const add = (w, h, d, x, y, z, rx = 0) => { const g = new THREE.BoxGeometry(w, h, d); if (rx) g.rotateX(rx); g.translate(x, y, z); P.push(plain(g)); };
+      add(0.7, 0.07, 1.45, 0, 0.33, 0.2); add(0.7, 0.07, 0.78, 0, 0.6, -0.74, 0.72);            // frame
+      add(0.62, 0.09, 1.4, 0, 0.41, 0.2); add(0.62, 0.09, 0.72, 0, 0.67, -0.71, 0.72);          // mattress
+      if (lo) add(0.56, 0.3, 1.2, 0, 0.15, 0.26);                                               // legs, as one block
+      else {
+        for (const [x, z] of [[-0.3, 0.82], [0.3, 0.82], [-0.3, -0.3], [0.3, -0.3]]) add(0.06, 0.3, 0.06, x, 0.15, z);
+        for (const x of [-0.32, 0.32]) add(0.05, 0.06, 1.5, x, 0.27, 0.2);
+      }
+      return mergeVertices(mergeGeometries(P));
+    };
     const sm = patchMaterial(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.75 }), {
       key: 'sunbed',
       color: `float mat = step(0.375, vObj.y) * step(abs(vObj.x), 0.312);
@@ -522,14 +574,19 @@ float stripe = step(0.5, fract(vObj.z*3.2 + vObj.y*1.2));
 vec3 cloth = mix(vec3(0.93,0.94,0.96), vec3(0.08,0.3,0.72), stripe);
 diffuseColor.rgb = mix(vec3(0.9,0.93,0.9), cloth, mat);`,
     });
-    const im = new THREE.InstancedMesh(g, sm, LAYOUT.sunbeds.length);
-    LAYOUT.sunbeds.forEach((s, i) => { m4.makeRotationY(s.rot); m4.setPosition(s.x, s.y, s.z); im.setMatrixAt(i, m4); });
-    im.castShadow = quality !== 'low'; im.receiveShadow = true; im.computeBoundingSphere();
-    scene.add(im);
+    createPool(scene, {
+      name: 'sunbeds', castShadow: quality !== 'low', margin: 0.1,
+      items: LAYOUT.sunbeds.map((b) => ({ matrix: trs(b.x, b.y, b.z, b.rot) })),
+      levels: [
+        { maxDist: 35, parts: [{ geometry: bed(false), material: sm }] },
+        { maxDist: 180, parts: [{ geometry: bed(true), material: sm }] },
+      ],
+    });
   }
   // ---- buoys ----
+  const m4 = new THREE.Matrix4();
   {
-    const g = new THREE.SphereGeometry(0.3, 16, 10);
+    const g = new THREE.SphereGeometry(0.3, 10, 6);
     const bm = patchMaterial(new THREE.MeshStandardMaterial({ color: 0xff5a14, roughness: 0.4 }), {
       key: 'buoy', color: 'diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.95), step(0.12, vObj.y)*step(vObj.y, 0.2));',
     });

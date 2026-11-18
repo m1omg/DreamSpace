@@ -6,6 +6,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { groundAt } from '../sim/terrain.js';
 import { mulberry32 } from '../sim/noise.js';
 import { patchMaterial, canvasTexture } from './shared.js';
+import { createPool } from './instancing.js';
 
 function rayTexture() {
   return canvasTexture(256, 256, (g, w, h) => {
@@ -33,7 +34,7 @@ function rayTexture() {
 function rayGeometry() {
   const disc = new THREE.CircleGeometry(0.5, 40, 0, Math.PI * 2);
   // subdivide radially by hand: rebuild as rings so the body can be domed
-  const rings = 6, seg = 40, pos = [], uv = [], idx = [];
+  const rings = 4, seg = 28, pos = [], uv = [], idx = [];
   pos.push(0, 0.075, 0); uv.push(0.5, 0.5);
   for (let r = 1; r <= rings; r++) for (let k = 0; k < seg; k++) {
     const a = (k / seg) * Math.PI * 2, t = r / rings;
@@ -127,20 +128,20 @@ export function createHazardModels(scene, hazards) {
   const M4 = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3(), S = new THREE.Vector3(1, 1, 1), E = new THREE.Euler();
 
   const rayMat = patchMaterial(new THREE.MeshStandardMaterial({ map: rayTexture(), roughness: 0.5, side: THREE.DoubleSide }), { key: 'ray' });
-  const rays = new THREE.InstancedMesh(rayGeometry(), rayMat, hazards.rays.length);
-  rays.frustumCulled = false; rays.receiveShadow = true;
-  rays.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   const rayY = hazards.rays.map((r) => groundAt(r.x, r.z));
-  const placeRay = (r, i, t) => {
+  const rayMatrix = (r, i, t) => {
     if (r.state !== 'rest') rayY[i] = groundAt(r.x, r.z);
     const flap = r.state === 'flee' ? Math.sin(t * 14 + i) * 0.12 : 0;
     E.set(flap * 0.4, r.yaw, 0, 'YXZ'); Q.setFromEuler(E);
     S.set(1.25, 1 + (r.state === 'flee' ? 0.6 : 0), 1.25);
-    M4.compose(V.set(r.x, rayY[i] + 0.025 + r.lift, r.z), Q, S);
-    rays.setMatrixAt(i, M4);
+    return M4.compose(V.set(r.x, rayY[i] + 0.025 + r.lift, r.z), Q, S);
   };
-  hazards.rays.forEach((r, i) => placeRay(r, i, 0));
-  scene.add(rays);
+  // they lie flat on the bottom: invisible beyond a few tens of metres
+  const rays = createPool(scene, {
+    name: 'rays', margin: 0.4,
+    items: hazards.rays.map((r, i) => ({ matrix: rayMatrix(r, i, 0).clone() })),
+    levels: [{ maxDist: 60, parts: [{ geometry: rayGeometry(), material: rayMat }] }],
+  });
 
   const lionMat = patchMaterial(new THREE.MeshStandardMaterial({ map: lionTexture(), alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.5 }), {
     key: 'lion', vertex: 'transformed.x += sin(uTime*2.2 + position.y*7.0 + position.z*5.0) * 0.02 * smoothstep(0.08, 0.4, length(position.xy));',
@@ -152,9 +153,9 @@ export function createHazardModels(scene, hazards) {
 
   return {
     update(t) {
-      let dirty = false;
-      hazards.rays.forEach((r, i) => { if (r.state !== 'rest' || r.dirty !== false) { placeRay(r, i, t); r.dirty = r.state !== 'rest'; dirty = true; } });
-      if (dirty) rays.instanceMatrix.needsUpdate = true;
+      hazards.rays.forEach((r, i) => {
+        if (r.state !== 'rest' || r.dirty !== false) { rays.set(i, rayMatrix(r, i, t)); r.dirty = r.state !== 'rest'; }
+      });
       S.set(1.15, 1.15, 1.15);
       hazards.lions.forEach((l, i) => {
         E.set(Math.sin(t * 0.7 + i) * 0.08, l.yaw, 0, 'YXZ'); Q.setFromEuler(E);

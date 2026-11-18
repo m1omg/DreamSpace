@@ -17,13 +17,52 @@ export const U = {
 };
 
 export const FOG_AIR = { color: new THREE.Color(0.7, 0.88, 1.08), density: 0.00085 };
+// the haze thins out with height (scale height in metres), so distant
+// mountain tops keep their contrast while the sea horizon stays hazy
+export const FOG_HEIGHT = 180;
 export const FOG_WATER = { color: new THREE.Color(0.03, 0.34, 0.44), density: 0.042 };
+
+// ---- engine-wide shader tweaks ---------------------------------------------------
+{
+  const C = THREE.ShaderChunk, d = SUN_DIR;
+  const sun = `vec3(${d.x.toFixed(5)}, ${d.y.toFixed(5)}, ${d.z.toFixed(5)})`;
+  const FOG_H = FOG_HEIGHT.toFixed(1);
+  // Aerial perspective: the haze glows warm towards the sun, the way the sky
+  // does at the horizon (only for the air fog; the water fog is dark teal).
+  C.fog_pars_vertex = '#ifdef USE_FOG\n\tvarying float vFogDepth;\n\tvarying vec3 vFogDir;\n#endif';
+  C.fog_vertex = '#ifdef USE_FOG\n\tvFogDepth = - mvPosition.z;\n\tvFogDir = ( vec4( mvPosition.xyz, 0.0 ) * viewMatrix ).xyz;\n#endif';
+  C.fog_pars_fragment = C.fog_pars_fragment.replace('varying float vFogDepth;', 'varying float vFogDepth;\n\tvarying vec3 vFogDir;');
+  C.fog_fragment = `#ifdef USE_FOG
+	#ifdef FOG_EXP2
+		// mean density along the ray, for a haze that thins out exponentially with height
+		float fogH0 = cameraPosition.y, fogDy = vFogDir.y;
+		float fogAvg = abs( fogDy ) > 1e-3
+			? ( exp( - fogH0 / ${FOG_H} ) - exp( - ( fogH0 + fogDy ) / ${FOG_H} ) ) * ${FOG_H} / fogDy
+			: exp( - fogH0 / ${FOG_H} );
+		float fogD = fogDensity * vFogDepth * mix( 1.0, fogAvg, smoothstep( 0.3, 0.6, fogColor.r ) );
+		float fogFactor = 1.0 - exp( - fogD * fogD );
+	#else
+		float fogFactor = smoothstep( fogNear, fogFar, vFogDepth );
+	#endif
+	float fogSd = max( dot( normalize( vFogDir ), ${sun} ), 0.0 );
+	vec3 fogCol = fogColor + vec3( 1.0, 0.85, 0.6 ) * ( pow( fogSd, 6.0 ) * 0.22 + pow( fogSd, 48.0 ) * 0.3 ) * smoothstep( 0.3, 0.6, fogColor.r );
+	gl_FragColor.rgb = mix( gl_FragColor.rgb, fogCol, fogFactor );
+#endif`;
+  // Sun shadows fade out over the last stretch of the shadow map instead of
+  // stopping at a hard line around the player.
+  C.shadowmap_pars_fragment = C.shadowmap_pars_fragment.replace('return mix( 1.0, shadow, shadowIntensity );', `vec2 shEdge = min( shadowCoord.xy, 1.0 - shadowCoord.xy );
+		return mix( 1.0, shadow, shadowIntensity * clamp( min( shEdge.x, shEdge.y ) * 9.0, 0.0, 1.0 ) );`);
+}
 
 export const GLSL_NOISE = /* glsl */ `
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float vnoise(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f*f*(3.0-2.0*f);
   return mix(mix(hash12(i), hash12(i+vec2(1.0,0.0)), u.x), mix(hash12(i+vec2(0.0,1.0)), hash12(i+vec2(1.0,1.0)), u.x), u.y); }
 float fbm(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ s += a*vnoise(p); p = p*2.03 + vec2(17.1,-9.7); a *= 0.5; } return s/0.9375; }
+// Weight for a noise layer of the given frequency (cycles per metre) when one
+// pixel covers fw metres: layers finer than a pixel fade to their mean value
+// instead of sparkling as the camera moves.
+float aaw(float freq, float fw){ return 1.0 - smoothstep(0.18, 0.55, freq*fw); }
 `;
 
 // Sun-light network on everything below the water line.
@@ -69,7 +108,7 @@ ${gx}${gz}  return g*amp; }
 export function patchMaterial(mat, opts = {}) {
   const waterLevel = { value: opts.waterLevel ?? 0 };
   const key = ['uw', opts.sway || 0, opts.swayWater || 0, opts.key || '', opts.vertexPars || '', opts.vertex || '',
-    opts.fragmentPars || '', opts.color || '', opts.bump || ''].join('|');
+    opts.fragmentPars || '', opts.color || '', opts.bump || '', opts.normalVertex || '', opts.ao || ''].join('|');
   mat.customProgramCacheKey = () => key;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = U.uTime;
@@ -82,6 +121,8 @@ varying vec3 vWPos;
 varying vec3 vObj;
 uniform float uTime;
 ${opts.vertexPars || ''}`)
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+${opts.normalVertex || ''}`)
       .replace('#include <begin_vertex>', `#include <begin_vertex>
 vObj = position;
 ${opts.sway ? `{
@@ -127,7 +168,16 @@ ${GLSL_NOISE}
 ${GLSL_CAUSTICS}
 ${opts.fragmentPars || ''}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
+float gFw = max(length(dFdx(vWPos)), length(dFdy(vWPos)));
 ${opts.color || ''}`)
+      .replace('#include <aomap_fragment>', `#include <aomap_fragment>
+${opts.ao ? `{
+  float gAO = 1.0;
+  ${opts.ao}
+  reflectedLight.indirectDiffuse *= gAO;
+  reflectedLight.indirectSpecular *= gAO;
+  reflectedLight.directDiffuse *= mix(1.0, gAO, 0.3);
+}` : ''}`)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
 ${opts.bump ? `{
   float bumpH; ${opts.bump}
@@ -214,6 +264,62 @@ export const GLSL_ZONE = /* glsl */ `
 uniform sampler2D tZone;
 vec2 zoneUV(vec2 p){ return vec2((p.x - (${ZONE.x0.toFixed(1)})) / ${(ZONE.x1 - ZONE.x0).toFixed(1)}, (p.y - (${ZONE.z0.toFixed(1)})) / ${(ZONE.z1 - ZONE.z0).toFixed(1)}); }
 `;
+
+// ---- water ripples ------------------------------------------------------------
+// A tileable ripple field (a sum of waves with whole-number wave vectors, so it
+// wraps seamlessly), stored as its slope in RG and two smooth noises in BA.
+// Sampled at a few scales it replaces nine value-noise evaluations per water
+// pixel, and mipmapping keeps distant water from sparkling.
+let rippleTex = null;
+export function rippleTexture() {
+  if (rippleTex) return rippleTex;
+  const N = 256, rnd = mulberry32(4711);
+  const waves = [];
+  for (let i = 0; i < 44; i++) {
+    let kx, ky, k;
+    do { kx = Math.round((rnd() - 0.5) * 30); ky = Math.round((rnd() - 0.5) * 30); k = Math.hypot(kx, ky); } while (k < 2.5 || k > 15);
+    // mostly along one direction, like wind-driven ripples
+    const along = Math.abs(kx * 0.8 + ky * 0.6) / k;
+    waves.push({ kx, ky, a: Math.pow(k, -1.6) * (0.45 + 0.55 * along), ph: rnd() * Math.PI * 2 });
+  }
+  const gx = new Float32Array(N * N), gy = new Float32Array(N * N);
+  let mx = 0;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    let sx = 0, sy = 0;
+    for (const w of waves) {
+      const s = -Math.sin((2 * Math.PI) * (w.kx * i + w.ky * j) / N + w.ph) * w.a * 2 * Math.PI;
+      sx += s * w.kx; sy += s * w.ky;
+    }
+    gx[j * N + i] = sx; gy[j * N + i] = sy;
+    mx = Math.max(mx, Math.abs(sx), Math.abs(sy));
+  }
+  // tileable value noise for foam break-up
+  const lattice = (cells, seed) => { const r = mulberry32(seed), v = new Float32Array(cells * cells); for (let k = 0; k < v.length; k++) v[k] = r(); return v; };
+  const L1 = lattice(16, 91), L2 = lattice(8, 92);
+  const vn = (L, cells, u, v) => {
+    const x = u * cells, y = v * cells, ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy;
+    const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    const at = (a, b) => L[((b % cells + cells) % cells) * cells + ((a % cells + cells) % cells)];
+    const a0 = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * sx, a1 = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * sx;
+    return a0 + (a1 - a0) * sy;
+  };
+  const data = new Uint8Array(N * N * 4);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const k = (j * N + i) * 4, u = i / N, v = j / N;
+    data[k] = Math.round(127.5 + 127 * gx[j * N + i] / mx);
+    data[k + 1] = Math.round(127.5 + 127 * gy[j * N + i] / mx);
+    data[k + 2] = Math.round(255 * vn(L1, 16, u, v));
+    data[k + 3] = Math.round(255 * (0.65 * vn(L2, 8, u, v) + 0.35 * vn(L1, 16, u + 0.37, v + 0.71)));
+  }
+  rippleTex = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
+  rippleTex.wrapS = rippleTex.wrapT = THREE.RepeatWrapping;
+  rippleTex.magFilter = THREE.LinearFilter;
+  rippleTex.minFilter = THREE.LinearMipmapLinearFilter;
+  rippleTex.generateMipmaps = true;
+  rippleTex.anisotropy = 4;
+  rippleTex.needsUpdate = true;
+  return rippleTex;
+}
 
 // ---- procedural detail textures -------------------------------------------------
 // Tileable Voronoi cells: used for flagstones, stone cladding and reptile scales.

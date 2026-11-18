@@ -201,5 +201,54 @@ function chase(mode) {
   check('flying over a stingray is safe', !stung3);
 }
 
+// --- 6. frame pacing ------------------------------------------------------------------------
+{
+  const { createPacer } = await import('../src/pacing.js');
+  // rAF timestamps rounded to whole milliseconds, as Firefox does
+  const run = (hz, seconds, opts = {}) => {
+    const pacer = createPacer();
+    const fed = [];
+    let clock = 0, prevStamp = 0, sum = 0, maxLag = 0, seed = 7;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    for (let i = 0; i < hz * seconds; i++) {
+      clock += opts.irregular ? (8 + rnd() * 17) / 1000 : 1 / hz;
+      if (opts.hitchAt === i) clock += 0.2;
+      const stamp = Math.round(clock * 1000) / 1000;
+      const dt = pacer.step(stamp - prevStamp);
+      prevStamp = stamp;
+      sum += dt; fed.push(dt);
+      if (i > hz) maxLag = Math.max(maxLag, Math.abs(sum - clock));
+    }
+    const tail = fed.slice(-hz);
+    const mean = tail.reduce((a, v) => a + v, 0) / tail.length;
+    const jitter = Math.sqrt(tail.reduce((a, v) => a + (v - mean) ** 2, 0) / tail.length);
+    return { jitter, maxLag, interval: pacer.interval };
+  };
+  for (const hz of [50, 60, 75, 120, 144, 165, 240]) {
+    const raw = 1000 / hz, r = run(hz, 6);
+    check(`steady frame times from rounded timestamps at ${hz} Hz`, r.jitter < 0.0001 && r.maxLag < 0.004,
+      `jitter ${(r.jitter * 1000).toFixed(3)} ms (raw ±0.5 ms), lag ${(r.maxLag * 1000).toFixed(2)} ms, interval ${(r.interval * 1000).toFixed(3)} / ${raw.toFixed(3)} ms`);
+  }
+  const irr = run(60, 6, { irregular: true });
+  check('irregular frames are passed through, not snapped', irr.interval === 0 && irr.maxLag < 0.002, `lag ${(irr.maxLag * 1000).toFixed(2)} ms`);
+  const hitch = run(60, 6, { hitchAt: 200 });
+  check('a hitch does not leave the game behind', hitch.maxLag < 0.004, `lag ${(hitch.maxLag * 1000).toFixed(2)} ms`);
+}
+
+// --- 7. translations ---------------------------------------------------------------------
+{
+  const { STRINGS, detect } = await import('../src/i18n.js');
+  const sk = STRINGS.sk, en = STRINGS.en;
+  const missing = [...Object.keys(sk).filter((k) => !(k in en)), ...Object.keys(en).filter((k) => !(k in sk))];
+  check('Slovak and English define the same texts', missing.length === 0, missing.join(', '));
+  const vars = (s) => (s.match(/\{\w+\}/g) || []).sort().join();
+  const bad = Object.keys(sk).filter((k) => k in en && vars(sk[k]) !== vars(en[k]));
+  check('both languages use the same placeholders', bad.length === 0, bad.join(', '));
+  const told = Object.entries(sk).filter(([k, v]) => /^(menu|doc)\./.test(k) && k !== 'menu.pausedDream' && /\bsen\b|sn[ií]|dream/i.test(v.replace(/DreamSpace/g, ''))).map(([k]) => k);
+  check('the menu does not give the dream away', told.length === 0, told.join(', '));
+  check('Slovak browsers get Slovak', detect(['sk-SK']) === 'sk' && detect(['en-US', 'sk']) === 'sk' && detect(['cs-CZ']) === 'sk');
+  check('everyone else gets English', detect(['en-US']) === 'en' && detect(['de-DE', 'en']) === 'en' && detect(['']) === 'en');
+}
+
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed');
 process.exit(failed ? 1 : 0);

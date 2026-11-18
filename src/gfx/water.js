@@ -4,8 +4,9 @@
 // window when the camera is below the surface.
 
 import * as THREE from 'three';
-import { U, GLSL_NOISE, GLSL_WAVES, GLSL_ZONE, WAVE_AMP, zoneTexture, LAYER_FX, FOG_AIR, FOG_WATER } from './shared.js';
+import { U, GLSL_NOISE, GLSL_WAVES, GLSL_ZONE, WAVE_AMP, zoneTexture, rippleTexture, LAYER_FX, FOG_AIR, FOG_WATER, FOG_HEIGHT } from './shared.js';
 import { poolOutline } from '../sim/terrain.js';
+import { heightMap } from './terrainMesh.js';
 import { POOLS } from '../sim/mapdata.js';
 
 const AMP = `(${WAVE_AMP.lagoon.toFixed(4)} + ${WAVE_AMP.sea.toFixed(4)}*`;
@@ -46,6 +47,10 @@ uniform vec3 uSunDir, uSunColor;
 uniform vec3 uAbsorb, uScatter;
 uniform vec3 uFogAir, uFogWater;
 uniform float uFogAirD, uFogWaterD;
+uniform sampler2D tRipple;
+uniform sampler2D tHeight;
+uniform vec4 uHeightInfo; // x0, z0, step, columns
+uniform float uHeightRows;
 varying vec3 vWorld;
 varying float vViewZ;
 varying float vAmp;
@@ -55,16 +60,24 @@ ${GLSL_ZONE}
 
 float linZ(float d){ float z = d*2.0 - 1.0; return 2.0*uNear*uFar/(uFar + uNear - z*(uFar - uNear)); }
 
-float ripple(vec2 p, float t){
-  return vnoise(p*0.9 + vec2(t*0.35, t*0.22)) + 0.5*vnoise(p*2.3 - vec2(t*0.5, -t*0.3)) + 0.25*vnoise(p*5.1 + vec2(-t*0.6, t*0.7));
+// sea bed height under a point (terrain only: piers, roots and legs do not count)
+float groundY(vec2 p){
+  vec2 cell = (p - uHeightInfo.xy) / uHeightInfo.z + 0.5;
+  return texture2D(tHeight, cell / vec2(uHeightInfo.w, uHeightRows)).r;
+}
+
+// slope of the small ripples: three scrolling scales of one tileable texture
+vec2 rippleSlope(vec2 p, float t){
+  vec2 g = (texture2D(tRipple, p*0.047 + vec2(t*0.0105, t*0.0062)).xy - 0.5) * 1.0;
+  g += (texture2D(tRipple, p.yx*0.113 + vec2(-t*0.017, t*0.013)).yx - 0.5) * 0.62;
+  g += (texture2D(tRipple, p*0.31 + vec2(t*0.026, -t*0.021)).xy - 0.5) * 0.36;
+  return g;
 }
 
 vec3 surfaceNormal(vec2 p, float dist){
   vec2 g = (uIsPool > 0.5) ? vec2(0.0) : waveGrad(p, uTime, vAmp) * (1.0 - smoothstep(60.0, 380.0, dist));
-  float e = 0.12;
-  float r0 = ripple(p, uTime), rx = ripple(p + vec2(e, 0.0), uTime), rz = ripple(p + vec2(0.0, e), uTime);
-  float k = (uIsPool > 0.5 ? 0.05 : 0.085) / (1.0 + dist*0.03);
-  g += vec2(rx - r0, rz - r0)/e * k;
+  float k = (uIsPool > 0.5 ? 0.22 : 0.4) / (1.0 + dist*0.02);
+  g += rippleSlope(p, uTime) * k;
   return normalize(vec3(-g.x, 1.0, -g.y));
 }
 
@@ -99,22 +112,32 @@ void main(){
     vec3 R = reflect(V, N); R.y = abs(R.y) + 0.02 + 0.22*far;
     vec3 sky = textureCube(tSky, normalize(R)).rgb;
     float sd = max(dot(normalize(R), uSunDir), 0.0);
-    float spec = pow(sd, 900.0)*45.0 + pow(sd, 90.0)*0.45;
+    // sun glitter: a sharp sparkle close by; further out the ripples are finer
+    // than a pixel, so the highlight spreads into a broad glittering path
+    float sharp = mix(1100.0, 160.0, far);
+    float spec = pow(sd, sharp)*mix(55.0, 9.0, far) + pow(sd, 70.0)*0.4;
     col = mix(body, sky, F) + uSunColor*spec;
 
     // foam where the water gets very thin
     if (uIsPool < 0.5) {
-      float fn = vnoise(vWorld.xz*1.7 + uTime*0.12);
-      float shore = 1.0 - smoothstep(0.0, 0.2, vdepth + (fn - 0.5)*0.12);
-      float lap = 0.5 + 0.5*sin(vdepth*30.0 - uTime*1.7 + fn*5.0);
+      float fn = texture2D(tRipple, vWorld.xz*0.106 + uTime*0.0075).b;
+      // foam needs shallow water over the sea bed itself, not just around a
+      // mangrove root or a leg that happens to pierce the surface
+      float wdepth = max(vdepth, vWorld.y - groundY(vWorld.xz));
+      float shore = 1.0 - smoothstep(0.0, 0.2, wdepth + (fn - 0.5)*0.12);
+      float lap = 0.5 + 0.5*sin(wdepth*30.0 - uTime*1.7 + fn*5.0);
       float foam = shore*(0.4 + 0.6*lap)*smoothstep(0.35, 0.6, fn + shore*0.5);
       // breaking crests out on the reef
       float crest = smoothstep(0.55, 1.0, waveHeight(vWorld.xz, uTime, 1.0))
-                    * smoothstep(0.12, 0.3, vAmp) * smoothstep(0.5, 0.8, vnoise(vWorld.xz*0.8 + uTime*0.3));
+                    * smoothstep(0.12, 0.3, vAmp) * smoothstep(0.5, 0.8, texture2D(tRipple, vWorld.xz*0.1 + uTime*0.0375).a);
       col = mix(col, vec3(1.0), clamp(foam*0.8 + crest*0.6, 0.0, 1.0));
     }
-    float f = 1.0 - exp(-uFogAirD*uFogAirD*dist*dist);
-    col = mix(col, uFogAir, f);
+    float fh = (cameraPosition.y - vWorld.y) / ${FOG_HEIGHT.toFixed(1)};
+    float fogAvg = abs(fh) > 1e-3 ? (exp(-vWorld.y/${FOG_HEIGHT.toFixed(1)}) - exp(-cameraPosition.y/${FOG_HEIGHT.toFixed(1)})) / fh : exp(-cameraPosition.y/${FOG_HEIGHT.toFixed(1)});
+    float fd = uFogAirD*dist*fogAvg;
+    float f = 1.0 - exp(-fd*fd);
+    float fsd = max(dot(V, uSunDir), 0.0);
+    col = mix(col, uFogAir + vec3(1.0, 0.85, 0.6)*(pow(fsd, 6.0)*0.22 + pow(fsd, 48.0)*0.3), f);
   } else {
     // seen from below
     vec3 Nd = -N;
@@ -149,6 +172,10 @@ function makeUniforms(pipeline, sky, pool) {
     tDepth: pipeline.uDepth,
     tSky: { value: sky.cubeTexture },
     tZone: { value: zoneTexture() },
+    tRipple: { value: rippleTexture() },
+    tHeight: { value: heightMap.texture },
+    uHeightInfo: { value: heightMap.info },
+    uHeightRows: { value: heightMap.nz },
     uRes: pipeline.uRes,
     uNear: pipeline.uNear,
     uFar: pipeline.uFar,

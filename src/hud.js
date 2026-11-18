@@ -3,6 +3,7 @@
 import { terrainHeight, shoreZ, flatMask, lagoonMask, poolOutline } from './sim/terrain.js';
 import { POOLS, HUTS } from './sim/mapdata.js';
 import { LAYOUT } from './sim/layout.js';
+import { t } from './i18n.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -66,35 +67,42 @@ export function createHud() {
   const bg = drawMapBackground();
   const mctx = el.map.getContext('2d');
   el.map.width = MAP.w; el.map.height = MAP.h;
-  let toastT = 0, comboT = 0, mapT = 0, last = {};
+  let toastT = 0, comboT = 0, mapT = 0, textT = 0, last = {};
   const set = (key, node, prop, val) => { if (last[key] !== val) { last[key] = val; node[prop] = val; } };
+  const scale = (v) => `scaleX(${Math.max(0, Math.min(1, v)).toFixed(3)})`;
 
   return {
+    refresh() { delete last.mode; textT = 0; },
     show(v) { el.hud.classList.toggle('on', v); },
     toast(text, secs = 3.2, cls = '') {
       el.toast.textContent = text; el.toast.className = 'toast on ' + cls; toastT = secs;
     },
     hint(text) { set('hint', el.hint, 'textContent', text); },
     combo(n, kind) {
-      el.combo.textContent = kind === 'perfect' ? `PERFEKTNÝ HOP ×${n}` : `HOP ×${n}`;
+      el.combo.textContent = t(kind === 'perfect' ? 'combo.perfect' : 'combo.hop', { n });
       el.combo.className = 'combo on ' + (kind === 'perfect' ? 'perfect' : '');
       comboT = 1.1;
     },
     update(dt, game) {
       const p = game.player;
       set('pearls', el.pearls, 'textContent', `${game.collected} / ${game.pearls.length}`);
-      set('hp', el.hp.style, 'width', Math.max(0, Math.round(p.health)) + '%');
-      set('o2', el.o2.style, 'width', Math.round(p.o2 * 100) + '%');
+      set('hp', el.hp.style, 'transform', scale(Math.round(p.health) / 100));
+      set('o2', el.o2.style, 'transform', scale(Math.round(p.o2 * 100) / 100));
       set('o2v', el.o2Row.style, 'opacity', p.o2 < 0.995 || p.underwater ? '1' : '0.25');
       set('o2low', el.o2Row, 'className', 'bar-row' + (p.o2 < 0.25 ? ' low' : ''));
       const sp = Math.hypot(p.vx, p.vz);
-      set('sp', el.speed, 'textContent', sp.toFixed(1));
-      set('spf', el.speedFill.style, 'width', Math.min(100, sp / 30 * 100).toFixed(0) + '%');
+      set('spf', el.speedFill.style, 'transform', scale(Math.round(sp / 30 * 200) / 200));
       set('spc', el.speedFill.style, 'background', sp > 16 ? '#7df9ff' : sp > 9.5 ? '#8dffb0' : '#ffd36b');
-      const mode = p.mode === 'swim' ? (p.underwater ? 'Potápanie' : 'Plávanie')
-        : p.mode === 'air' ? (p.gliding > 0.5 ? `Plachtenie · ${Math.max(0, p.height).toFixed(1)} m` : 'Vo vzduchu')
-          : p.depth > 0.12 ? 'Brodenie – skáč!' : 'Na súši';
-      set('mode', el.mode, 'textContent', mode);
+      // numbers change every frame; re-laying out text that often costs more than it shows
+      textT -= dt;
+      if (textT <= 0) {
+        textT = 1 / 15;
+        set('sp', el.speed, 'textContent', sp.toFixed(1));
+        const mode = p.mode === 'swim' ? t(p.underwater ? 'mode.dive' : 'mode.swim')
+          : p.mode === 'air' ? (p.gliding > 0.5 ? t('mode.glide', { h: Math.max(0, p.height).toFixed(1) }) : t('mode.air'))
+            : t(p.depth > 0.12 ? 'mode.wade' : 'mode.land');
+        set('mode', el.mode, 'textContent', mode);
+      }
       set('danger', el.danger, 'className', game.chasing ? 'on' : '');
       set('poison', el.poison, 'className', 'poison' + (p.poison > 0 ? ' on' : ''));
       if (toastT > 0) { toastT -= dt; if (toastT <= 0) el.toast.className = 'toast'; }

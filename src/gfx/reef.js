@@ -6,6 +6,8 @@ import { LAYOUT } from '../sim/layout.js';
 import { terrainHeight, shoreZ } from '../sim/terrain.js';
 import { mulberry32, vnoise } from '../sim/noise.js';
 import { patchMaterial } from './shared.js';
+import { heightAt } from './terrainMesh.js';
+import { createPool, sphereVisible, VIEW } from './instancing.js';
 
 const M4 = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3(), S = new THREE.Vector3(), E = new THREE.Euler();
 
@@ -27,21 +29,22 @@ function lumpy(geo, amp, freq, seed) {
   return geo;
 }
 
-function coralGeometries() {
+// `lo`: the same colonies with far fewer triangles, for the distance
+function coralGeometries(lo = false) {
   const rnd = mulberry32(4242);
-  const clean = (g) => { if (g.index) g.computeVertexNormals(); const n = g.index ? g.toNonIndexed() : g; n.deleteAttribute('uv'); return n; };
+  const clean = (g) => { g.deleteAttribute('uv'); return g; };
   // 0 boulder / brain coral
-  const boulder = lumpy(new THREE.SphereGeometry(0.5, 16, 10), 0.16, 4.5, 1);
+  const boulder = lumpy(new THREE.SphereGeometry(0.5, lo ? 9 : 16, lo ? 6 : 10), 0.16, 4.5, 1);
   boulder.scale(1, 0.72, 1); boulder.translate(0, 0.22, 0);
   // 1 table coral
-  const stalk = new THREE.CylinderGeometry(0.1, 0.16, 0.45, 6); stalk.translate(0, 0.22, 0);
-  const plate = lumpy(new THREE.CylinderGeometry(0.85, 0.5, 0.11, 26, 2), 0.1, 3, 2); plate.translate(0, 0.5, 0);
+  const stalk = new THREE.CylinderGeometry(0.1, 0.16, 0.45, lo ? 4 : 6); stalk.translate(0, 0.22, 0);
+  const plate = lumpy(new THREE.CylinderGeometry(0.85, 0.5, 0.11, lo ? 10 : 26, lo ? 1 : 2), 0.1, 3, 2); plate.translate(0, 0.5, 0);
   const table = mergeGeometries([clean(stalk), clean(plate)]);
   // 2 staghorn
   const horns = [];
   for (let i = 0; i < 13; i++) {
     const h = 0.4 + rnd() * 0.5;
-    const c = new THREE.CylinderGeometry(0.018, 0.06, h, 7, 2);
+    const c = new THREE.CylinderGeometry(0.018, 0.06, h, lo ? 4 : 7, lo ? 1 : 2);
     c.translate(0, h / 2, 0);
     c.rotateZ((rnd() - 0.5) * 1.3); c.rotateX((rnd() - 0.5) * 1.3);
     c.translate((rnd() - 0.5) * 0.35, 0, (rnd() - 0.5) * 0.35);
@@ -52,7 +55,7 @@ function coralGeometries() {
   const tubes = [];
   for (let i = 0; i < 5; i++) {
     const h = 0.35 + rnd() * 0.55;
-    const c = new THREE.CylinderGeometry(0.11, 0.07, h, 12, 2, true);
+    const c = new THREE.CylinderGeometry(0.11, 0.07, h, lo ? 6 : 12, lo ? 1 : 2, true);
     c.translate((rnd() - 0.5) * 0.4, h / 2, (rnd() - 0.5) * 0.4);
     tubes.push(clean(c));
   }
@@ -62,7 +65,7 @@ function coralGeometries() {
 
 export function createReef(scene, quality) {
   const rnd = mulberry32(999);
-  const geos = coralGeometries();
+  const geos = coralGeometries(), geosLo = coralGeometries(true);
   const items = [[], [], [], []];
   // corals on the lagoon bommies
   for (const b of LAYOUT.bommies) {
@@ -86,22 +89,24 @@ diffuseColor.rgb = mix(diffuseColor.rgb, vec3(1.0, 0.97, 0.9), smoothstep(0.62, 
 diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb*1.5 + 0.08, smoothstep(0.25, 0.8, vObj.y)*0.5);`,
     bump: 'bumpH = (vnoise(vWPos.xz*38.0 + vWPos.y*31.0)*0.6 + vnoise(vWPos.zx*90.0 + vWPos.y*70.0)*0.4) * 0.05;',
   });
-  const col = new THREE.Color();
+  // under water the bottom fades out within a few tens of metres, so the
+  // coral is drawn only nearby, with a simpler model beyond ~40 m
   items.forEach((list, t) => {
     if (!list.length) return;
-    const im = new THREE.InstancedMesh(geos[t], coralMat, list.length);
-    list.forEach((c, i) => {
-      E.set((rnd() - 0.5) * 0.3, c.rot, (rnd() - 0.5) * 0.3);
+    const inst = list.map((c) => {
+      E.set((rnd() - 0.5) * 0.3, c.rot, (rnd() - 0.5) * 0.3, 'XYZ');
       Q.setFromEuler(E);
-      M4.compose(V.set(c.x, c.y, c.z), Q, S.set(c.s, c.s * (0.8 + rnd() * 0.5), c.s));
-      im.setMatrixAt(i, M4);
+      const matrix = new THREE.Matrix4().compose(V.set(c.x, c.y, c.z), Q, S.set(c.s, c.s * (0.8 + rnd() * 0.5), c.s));
       const p = PALETTE[(c.c * PALETTE.length) | 0];
-      col.setRGB(p[0], p[1], p[2]).multiplyScalar(0.75 + rnd() * 0.35);
-      im.setColorAt(i, col);
+      return { matrix, color: new THREE.Color(p[0], p[1], p[2]).multiplyScalar(0.75 + rnd() * 0.35) };
     });
-    im.computeBoundingSphere();
-    im.receiveShadow = true;
-    scene.add(im);
+    createPool(scene, {
+      name: 'coral' + t, items: inst, margin: 0.2,
+      levels: [
+        { maxDist: 38, parts: [{ geometry: geos[t], material: coralMat, color: true }] },
+        { maxDist: quality === 'low' ? 80 : 120, parts: [{ geometry: geosLo[t], material: coralMat, color: true }] },
+      ],
+    });
   });
 
   // bommie rocks
@@ -141,14 +146,15 @@ const SPECIES = [
 ];
 
 function fishGeometry() {
-  const body = new THREE.SphereGeometry(0.5, 14, 10);
+  const body = new THREE.SphereGeometry(0.5, 8, 6);
   body.scale(0.24, 0.52, 1.0);
   { const bp = body.attributes.position; for (let i = 0; i < bp.count; i++) { const z = bp.getZ(i); if (z < 0) bp.setY(i, bp.getY(i) * (1 + z * 1.2)); } body.computeVertexNormals(); }
+  body.deleteAttribute('uv');
   const tail = new THREE.BufferGeometry();
   tail.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, -0.4, 0, 0.36, -0.95, 0, -0.36, -0.95], 3));
   tail.setAttribute('normal', new THREE.Float32BufferAttribute([1, 0, 0, 1, 0, 0, 1, 0, 0], 3));
-  const b = body.toNonIndexed(); b.deleteAttribute('uv');
-  return mergeGeometries([b, tail]);
+  tail.setIndex([0, 1, 2]);
+  return mergeGeometries([body, tail]);
 }
 
 function createFish(scene, quality) {
@@ -164,7 +170,11 @@ function createFish(scene, quality) {
   }
   let total = 0;
   const div = quality === 'low' ? 2 : 1;
-  for (const s of schools) { s.n = Math.ceil(s.sp.n / div); s.start = total; total += s.n; }
+  for (const s of schools) {
+    s.n = Math.ceil(s.sp.n / div); s.start = total; total += s.n;
+    // everything a school can reach: its wandering centre plus the spread of the fish
+    s.br = s.range * 0.75 + s.sp.spread * 1.6 + 1.5;
+  }
   const mat = patchMaterial(new THREE.MeshStandardMaterial({ roughness: 0.3, metalness: 0.15, side: THREE.DoubleSide }), {
     key: 'fish',
     // countershading, a dark eye and vertical bars whose strength varies per fish
@@ -178,15 +188,20 @@ diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.02), 1.0 - smoothstep(0.035, 0.0
   mesh.frustumCulled = false;
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   const col = new THREE.Color();
-  const seeds = new Float32Array(total * 4);
+  const seeds = new Float32Array(total * 4), colors = new Float32Array(total * 3);
   for (const s of schools) {
     for (let i = 0; i < s.n; i++) {
       const k = s.start + i;
       seeds[k * 4] = rnd() * 6.283; seeds[k * 4 + 1] = rnd() * 6.283; seeds[k * 4 + 2] = 0.5 + rnd() * 0.5; seeds[k * 4 + 3] = 0.75 + rnd() * 0.5;
       col.setRGB(s.sp.body[0], s.sp.body[1], s.sp.body[2]).multiplyScalar(0.8 + rnd() * 0.35);
+      col.toArray(colors, k * 3);
       mesh.setColorAt(k, col);
     }
   }
+  mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  // first frame: a single zero-size fish, just to compile the shader
+  mesh.setMatrixAt(0, new THREE.Matrix4().makeScale(0, 0, 0));
+  mesh.count = 1;
   scene.add(mesh);
 
   const P = new THREE.Vector3(), P2 = new THREE.Vector3();
@@ -203,13 +218,19 @@ diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.02), 1.0 - smoothstep(0.035, 0.0
       cy + Math.sin(ft * 1.3 + b) * s.sp.spread * 0.3 * r,
       cz + Math.sin(ft + b) * s.sp.spread * r + Math.cos(ft * 1.7 + a) * 0.5,
     );
-    const floor = terrainHeight(out.x, out.z) + 0.25;
+    const floor = heightAt(out.x, out.z) + 0.25;
     if (out.y < floor) out.y = floor;
     if (out.y > -0.3) out.y = -0.3;
   };
+  const ic = mesh.instanceColor.array;
   return {
     update(t) {
+      // fish are tiny and under water: only schools close by and in view are
+      // animated and drawn, packed to the front of the instance buffer
+      let slot = 0;
       for (const s of schools) {
+        const dx = s.x - VIEW.x, dz = s.z - VIEW.z;
+        if (dx * dx + dz * dz > (55 + s.br) ** 2 || !sphereVisible(s.x, s.y, s.z, s.br)) continue;
         for (let i = 0; i < s.n; i++) {
           const k = s.start + i;
           fishPos(s, k, t, P);
@@ -220,10 +241,17 @@ diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.02), 1.0 - smoothstep(0.035, 0.0
           E.set(pitch, yaw, 0, 'YXZ'); Q.setFromEuler(E);
           const sz = s.sp.size * seeds[k * 4 + 3] * 2;
           M4.compose(P, Q, S.set(sz, sz, sz));
-          mesh.setMatrixAt(k, M4);
+          mesh.setMatrixAt(slot, M4);
+          ic[slot * 3] = colors[k * 3]; ic[slot * 3 + 1] = colors[k * 3 + 1]; ic[slot * 3 + 2] = colors[k * 3 + 2];
+          slot++;
         }
       }
-      mesh.instanceMatrix.needsUpdate = true;
+      mesh.count = slot;
+      mesh.visible = slot > 0;
+      if (slot) {
+        mesh.instanceMatrix.clearUpdateRanges(); mesh.instanceMatrix.addUpdateRange(0, slot * 16); mesh.instanceMatrix.needsUpdate = true;
+        mesh.instanceColor.clearUpdateRanges(); mesh.instanceColor.addUpdateRange(0, slot * 3); mesh.instanceColor.needsUpdate = true;
+      }
     },
   };
 }
@@ -267,7 +295,10 @@ diffuseColor.rgb = mix(diffuseColor.rgb*(0.7 + 0.6*hash12(floor(sp))), vec3(0.75
         const d = tu.d, a = t * 0.07 + d.ph;
         const cx = d.x, cz = d.d + shoreZ(d.x);
         const x = cx + Math.cos(a) * d.r * 1.6, z = cz + Math.sin(a) * d.r * 0.7;
-        const y = Math.max(terrainHeight(x, z) + 0.6, -1.1 + Math.sin(a * 3.1) * 0.45);
+        // a turtle is a handful of small parts under water: skip it unless it is close
+        tu.g.visible = (x - VIEW.x) ** 2 + (z - VIEW.z) ** 2 < 70 * 70;
+        if (!tu.g.visible) continue;
+        const y = Math.max(heightAt(x, z) + 0.6, -1.1 + Math.sin(a * 3.1) * 0.45);
         tu.g.position.set(x, Math.min(y, -0.35), z);
         const vx = -Math.sin(a) * 1.6, vz = Math.cos(a) * 0.7;
         tu.g.rotation.set(Math.sin(a * 3.1 + 1.5) * 0.12, Math.atan2(vx, vz), 0, 'YXZ');

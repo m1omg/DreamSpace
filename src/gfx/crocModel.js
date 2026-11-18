@@ -1,11 +1,19 @@
-// Procedural saltwater crocodile: a lofted body with scutes, a hinged upper
-// jaw with teeth, four legs, and a tail that sways in the vertex shader.
+// Procedural saltwater crocodiles: a lofted body with scutes, a hinged upper
+// jaw with teeth, four legs, and a tail that sways.
+//
+// All crocodiles are one instanced mesh with one draw call (plus one for the
+// shadow). Every vertex knows which part it belongs to (body, upper jaw, one
+// of the legs) and the vertex shader bends the jaw, swings the legs and sways
+// the tail from a few numbers per crocodile, so nothing is drawn as a separate
+// object. Crocodiles out of view are not drawn at all.
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { vnoise } from '../sim/noise.js';
 import { patchMaterial, paint, detailTextures } from './shared.js';
-import { groundAt, waterLevelAt } from '../sim/terrain.js';
+import { waterLevelAt } from '../sim/terrain.js';
+import { heightAt } from './terrainMesh.js';
+import { VIEW, sphereVisible, inShadowBox } from './instancing.js';
 
 // stations along the spine: z, half width, top y, bottom y
 const BODY = [
@@ -35,8 +43,7 @@ function interp(st, z) {
 }
 
 // Loft a closed skin through the stations. `scutes` adds the armoured ridges.
-function loft(st, rings, scutes, mouth) {
-  const RAD = 22;
+function loft(st, rings, scutes, mouth, RAD = 22) {
   const pos = [], col = [], idx = [], uvs = [];
   const z0 = st[0][0], z1 = st[st.length - 1][0];
   const back = new THREE.Color(0.13, 0.17, 0.085), belly = new THREE.Color(0.46, 0.43, 0.27), band = new THREE.Color(0.05, 0.065, 0.035);
@@ -87,7 +94,7 @@ function loft(st, rings, scutes, mouth) {
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   g.setIndex(idx);
   g.computeVertexNormals();
-  return g.toNonIndexed(); // smooth normals are kept
+  return g;
 }
 
 function teeth(st, up) {
@@ -99,110 +106,195 @@ function teeth(st, up) {
       const t = new THREE.ConeGeometry(0.02, 0.085, 4);
       if (up) t.rotateX(Math.PI);
       t.translate(sx * w * 0.86, up ? bot - 0.03 : top + 0.03, z);
-      const n = t.toNonIndexed();
-      const tu = n.attributes.uv; for (let q = 0; q < tu.count; q++) tu.setXY(q, 0.02, 0.02);
-      parts.push(paint(n, new THREE.Color(1.25, 1.2, 1.1)));
+      const tu = t.attributes.uv; for (let q = 0; q < tu.count; q++) tu.setXY(q, 0.02, 0.02);
+      parts.push(paint(t, new THREE.Color(1.25, 1.2, 1.1)));
     }
   }
   return mergeGeometries(parts);
 }
 
-let shared = null;
-function geometries() {
-  if (shared) return shared;
-  const toNI = (g) => g;
-  const body = mergeGeometries([toNI(loft(BODY, 78, true, null)), toNI(loft(LOWER, 16, false, 'lower')), teeth(LOWER, false)]);
-  const upperRaw = mergeGeometries([toNI(loft(UPPER, 20, true, 'upper')), teeth(UPPER, true)]);
-  // hinge at the back of the head
-  upperRaw.translate(0, -0.14, -0.9);
-  const leg = (() => {
-    const col = new THREE.Color(0.12, 0.15, 0.08);
-    const up = new THREE.CapsuleGeometry(0.085, 0.3, 4, 10); up.rotateZ(Math.PI / 2 - 0.5); up.translate(0.2, -0.04, 0);
-    const low = new THREE.CapsuleGeometry(0.065, 0.2, 4, 10); low.rotateZ(0.25); low.translate(0.4, -0.13, 0.02);
-    const foot = new THREE.SphereGeometry(0.13, 10, 8); foot.scale(1.25, 0.32, 1.0); foot.translate(0.47, -0.25, 0.06);
-    const parts = [up, low, foot];
-    for (let i = -1; i <= 1; i++) {
-      const toe = new THREE.ConeGeometry(0.03, 0.16, 6); toe.rotateZ(-Math.PI / 2); toe.rotateY(-i * 0.45); toe.translate(0.62, -0.26, 0.06 + i * 0.07);
-      parts.push(toe);
-    }
-    return paint(mergeGeometries(parts.map((g) => g.toNonIndexed())), col);
-  })();
-  const eye = new THREE.SphereGeometry(0.04, 14, 10);
-  shared = { body, upper: upperRaw, leg, eye };
-  return shared;
+// aRig = (part: 0 body, 1 upper jaw, 2 leg; leg side; leg phase offset; eye), aPivot = joint
+function rig(g, part, pivot, side = 0, phase = 0, eye = 0) {
+  const n = g.attributes.position.count;
+  const r = new Float32Array(n * 4), p = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    r[i * 4] = part; r[i * 4 + 1] = side; r[i * 4 + 2] = phase; r[i * 4 + 3] = eye;
+    p[i * 3] = pivot[0]; p[i * 3 + 1] = pivot[1]; p[i * 3 + 2] = pivot[2];
+  }
+  g.setAttribute('aRig', new THREE.BufferAttribute(r, 4));
+  g.setAttribute('aPivot', new THREE.BufferAttribute(p, 3));
+  return g;
+}
+function mirrorX(g) {
+  const m = g.clone();
+  m.scale(-1, 1, 1);
+  const idx = m.index.array; // keep the triangles facing outwards
+  for (let i = 0; i < idx.length; i += 3) { const t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t; }
+  return m;
 }
 
-export function createCrocModel(scene, croc) {
-  const G = geometries();
-  const sway = { value: 0 }, swayAmp = { value: 0.25 };
-  const T = detailTextures();
-  const mk = () => patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, map: T.scales, bumpMap: T.scales, bumpScale: 3.0, roughness: 0.55, metalness: 0.0 }), {
-    key: 'croc',
-    uniforms: { uSway: sway, uSwayAmp: swayAmp },
-    vertexPars: 'uniform float uSway; uniform float uSwayAmp;',
-    vertex: `{
-  float tz = min(transformed.z - 0.3, 0.0);
-  transformed.x += sin(uSway + tz*1.25) * uSwayAmp * tz*tz*0.16 + sin(uSway + 1.2) * uSwayAmp * 0.12 * max(transformed.z, 0.0);
-}`,
-  });
-  const bodyMat = mk();
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(G.body, bodyMat);
-  const jaw = new THREE.Group();
-  jaw.position.set(0, 0.14, 0.9);
-  const upper = new THREE.Mesh(G.upper, bodyMat);
-  jaw.add(upper);
-  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x302000, emissive: 0xffc21a, emissiveIntensity: 2.6, roughness: 0.2 });
+const HINGE = [0, 0.14, 0.9];
+// `lo`: the distant crocodile, about a tenth of the triangles (no teeth, toes or scutes)
+function crocGeometry(lo = false) {
+  const parts = [];
+  parts.push(rig(loft(BODY, lo ? 24 : 78, !lo, null, lo ? 10 : 22), 0, [0, 0, 0]));
+  parts.push(rig(loft(LOWER, lo ? 6 : 16, false, 'lower', lo ? 10 : 22), 0, [0, 0, 0]));
+  if (!lo) parts.push(rig(teeth(LOWER, false), 0, [0, 0, 0]));
+  parts.push(rig(loft(UPPER, lo ? 7 : 20, !lo, 'upper', lo ? 10 : 22), 1, HINGE));
+  if (!lo) parts.push(rig(teeth(UPPER, true), 1, HINGE));
   for (const sx of [-1, 1]) {
-    const e = new THREE.Mesh(G.eye, eyeMat);
-    e.position.set(sx * 0.2, 0.235, 0.22);
-    e.scale.set(1, 1, 1.4);
-    jaw.add(e);
+    const eye = new THREE.SphereGeometry(0.04, lo ? 6 : 14, lo ? 4 : 10);
+    eye.scale(1, 1, 1.4);
+    eye.translate(sx * 0.2, HINGE[1] + 0.235, HINGE[2] + 0.22);
+    parts.push(rig(paint(eye, new THREE.Color(0x302000)), 1, HINGE, 0, 0, 1));
   }
-  group.add(body, jaw);
-  const legMat = new THREE.MeshStandardMaterial({ vertexColors: true, map: T.scales, bumpMap: T.scales, bumpScale: 2.0, roughness: 0.6 });
-  const legs = [];
-  for (const [sx, z] of [[1, 0.3], [-1, 0.3], [1, -1.0], [-1, -1.0]]) {
-    const pivot = new THREE.Group();
-    pivot.position.set(sx * 0.3, 0.12, z);
-    const l = new THREE.Mesh(G.leg, legMat);
-    l.scale.x = sx;
-    pivot.add(l); group.add(pivot);
-    legs.push({ pivot, sx, front: z > 0 });
+  const leg = (() => {
+    const up = new THREE.CapsuleGeometry(0.085, 0.3, lo ? 1 : 4, lo ? 5 : 10); up.rotateZ(Math.PI / 2 - 0.5); up.translate(0.2, -0.04, 0);
+    const low = new THREE.CapsuleGeometry(0.065, 0.2, lo ? 1 : 4, lo ? 5 : 10); low.rotateZ(0.25); low.translate(0.4, -0.13, 0.02);
+    const foot = new THREE.SphereGeometry(0.13, lo ? 6 : 10, lo ? 4 : 8); foot.scale(1.25, 0.32, 1.0); foot.translate(0.47, -0.25, 0.06);
+    const p = [up, low, foot];
+    for (let i = -1; i <= 1 && !lo; i++) {
+      const toe = new THREE.ConeGeometry(0.03, 0.16, 6); toe.rotateZ(-Math.PI / 2); toe.rotateY(-i * 0.45); toe.translate(0.62, -0.26, 0.06 + i * 0.07);
+      p.push(toe);
+    }
+    return paint(mergeGeometries(p), new THREE.Color(0.12, 0.15, 0.08));
+  })();
+  // legs: front/back, right/left; diagonal pairs step together
+  for (const [sx, z, ph] of [[1, 0.3, 0], [-1, 0.3, Math.PI], [1, -1.0, Math.PI], [-1, -1.0, 0]]) {
+    const g = sx > 0 ? leg.clone() : mirrorX(leg);
+    g.translate(sx * 0.3, 0.12, z);
+    parts.push(rig(g, 2, [sx * 0.3, 0.12, z], sx, ph));
   }
-  group.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
-  group.scale.setScalar(croc.size);
-  scene.add(group);
+  return mergeGeometries(parts);
+}
 
-  let phase = croc.index * 1.7, y = 0, pitch = 0, yawPrev = croc.yaw;
+const RIG = /* glsl */ `
+attribute vec4 aRig;
+attribute vec3 aPivot;
+attribute vec4 aAnim;  // per crocodile: sway phase, sway amount, jaw angle, leg phase
+attribute vec2 aLeg;   // per crocodile: leg swing, leg lift
+mat3 rigRotX(float a){ float c = cos(a), s = sin(a); return mat3(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c); }
+mat3 rigRotY(float a){ float c = cos(a), s = sin(a); return mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c); }
+mat3 rigRotZ(float a){ float c = cos(a), s = sin(a); return mat3(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0); }
+mat3 crocRot(){
+  if (aRig.x > 1.5) { float ph = aAnim.w + aRig.z; return rigRotY(sin(ph)*aLeg.x) * rigRotZ(aRig.y*max(0.0, cos(ph))*aLeg.y); }
+  if (aRig.x > 0.5) return rigRotX(aAnim.z);
+  return mat3(1.0);
+}
+vec3 crocPos(vec3 p){
+  p = aPivot + crocRot() * (p - aPivot);
+  float tz = min(p.z - 0.3, 0.0);
+  p.x += sin(aAnim.x + tz*1.25)*aAnim.y*tz*tz*0.16 + sin(aAnim.x + 1.2)*aAnim.y*0.12*max(p.z, 0.0);
+  return p;
+}
+`;
+
+export function createCrocs(scene, crocs) {
+  const n = crocs.length;
+  const T = detailTextures();
+  const mat = patchMaterial(new THREE.MeshStandardMaterial({ vertexColors: true, map: T.scales, bumpMap: T.scales, bumpScale: 2.6, roughness: 0.55, metalness: 0.0 }), {
+    key: 'crocs',
+    vertexPars: RIG + 'varying float vEye;',
+    normalVertex: 'objectNormal = crocRot() * objectNormal;',
+    vertex: 'transformed = crocPos(transformed); vEye = aRig.w;',
+    fragmentPars: 'varying float vEye;',
+    patch(shader) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.2, vEye);')
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vec3(1.0, 0.54, 0.01) * 2.6 * vEye;');
+    },
+  });
+  // the shadow has to bend the same way
+  const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  depth.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\n' + RIG)
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed = crocPos(transformed);');
+  };
+  depth.customProgramCacheKey = () => 'crocDepth';
+
+  // two levels of detail; each draws visible crocodiles first, then the
+  // off-screen ones whose shadow may still fall into view
+  const level = (lo) => {
+    const G = crocGeometry(lo);
+    const anim = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+    const leg = new THREE.InstancedBufferAttribute(new Float32Array(n * 2), 2);
+    anim.setUsage(THREE.DynamicDrawUsage); leg.setUsage(THREE.DynamicDrawUsage);
+    G.setAttribute('aAnim', anim);
+    G.setAttribute('aLeg', leg);
+    const mesh = new THREE.InstancedMesh(G, mat, n);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.customDepthMaterial = depth;
+    mesh.frustumCulled = false;
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    const L = { mesh, anim, leg, nMain: 1, nAll: 1, later: new Int32Array(n), nl: 0 };
+    // first frame: one invisible (zero-size) crocodile, so the shaders get compiled
+    new THREE.Matrix4().makeScale(0, 0, 0).toArray(mesh.instanceMatrix.array, 0);
+    mesh.count = 1;
+    mesh.onBeforeShadow = () => { mesh.count = L.nAll; };
+    mesh.onAfterShadow = () => { mesh.count = L.nMain; };
+    scene.add(mesh);
+    return L;
+  };
+  const levels = [level(false), level(true)];
+
+  const st = crocs.map((c) => ({ y: 0, pitch: 0, phase: c.index * 1.7, on: false }));
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler(), P = new THREE.Vector3(), S = new THREE.Vector3();
+  let poses = null, dtNow = 0, timeNow = 0;
+
+  // pose crocodile i (interpolated position from the simulation) into slot k of a level
+  const write = (L, k, i) => {
+    const { mesh, anim, leg } = L;
+    const croc = crocs[i], s = st[i], { x, z, yaw } = poses[i], dt = dtNow;
+    const ground = heightAt(x, z), surf = waterLevelAt(x, z, timeNow);
+    const depthW = surf - ground;
+    const lurk = croc.state === 'idle' || croc.state === 'home' || croc.state === 'rest';
+    // walk on the bottom in the shallows, float with eyes out in deep water
+    const targetY = Math.max(ground + 0.04 * croc.size, surf - (lurk ? 0.36 : 0.27) * croc.size);
+    const ahead = heightAt(x + Math.sin(yaw) * 1.4, z + Math.cos(yaw) * 1.4);
+    const tp = depthW < 0.3 ? Math.atan2(ahead - ground, 1.4) * 0.8 : 0;
+    if (s.on) {
+      s.y += (targetY - s.y) * (1 - Math.exp(-9 * dt));
+      s.pitch += (tp - s.pitch) * (1 - Math.exp(-6 * dt));
+    } else { s.y = targetY; s.pitch = tp; }
+    s.on = true;
+    E.set(-s.pitch + (croc.state === 'lunge' ? -0.12 : 0), yaw, 0, 'YXZ');
+    M.compose(P.set(x, s.y, z), Q.setFromEuler(E), S.setScalar(croc.size));
+    M.toArray(mesh.instanceMatrix.array, k * 16);
+    const sp = croc.speed;
+    s.phase += dt * (2.2 + sp * 1.25);
+    const walk = depthW < 0.9 ? 1 : 0.35;
+    anim.array[k * 4] = s.phase;
+    anim.array[k * 4 + 1] = 0.1 + Math.min(1, sp / 7) * 0.32;
+    anim.array[k * 4 + 2] = -croc.jaw * 0.62;
+    anim.array[k * 4 + 3] = s.phase * 1.5;
+    leg.array[k * 2] = 0.5 * walk * Math.min(1, sp / 2 + 0.15);
+    leg.array[k * 2 + 1] = 0.18 * walk;
+  };
+
   return {
-    group,
-    // x, z, yaw are the interpolated render pose
-    update(x, z, yaw, dt, time) {
-      const ground = groundAt(x, z), surf = waterLevelAt(x, z, time);
-      const depth = surf - ground;
-      const lurk = croc.state === 'idle' || croc.state === 'home' || croc.state === 'rest';
-      // walk on the bottom in the shallows, float with eyes out in deep water
-      const targetY = Math.max(ground + 0.04 * croc.size, surf - (lurk ? 0.36 : 0.27) * croc.size);
-      y += (targetY - y) * (1 - Math.exp(-9 * dt));
-      const ahead = groundAt(x + Math.sin(yaw) * 1.4, z + Math.cos(yaw) * 1.4);
-      const tp = depth < 0.3 ? Math.atan2(ahead - ground, 1.4) * 0.8 : 0;
-      pitch += (tp - pitch) * (1 - Math.exp(-6 * dt));
-      group.position.set(x, y, z);
-      let dyaw = yaw - yawPrev;
-      if (dyaw > Math.PI) dyaw -= Math.PI * 2; else if (dyaw < -Math.PI) dyaw += Math.PI * 2;
-      yawPrev = yaw;
-      group.rotation.set(-pitch + (croc.state === 'lunge' ? -0.12 : 0), yaw, 0, 'YXZ');
-      const sp = croc.speed;
-      phase += dt * (2.2 + sp * 1.25);
-      sway.value = phase;
-      swayAmp.value = 0.1 + Math.min(1, sp / 7) * 0.32;
-      jaw.rotation.x = -croc.jaw * 0.62;
-      const walk = depth < 0.9 ? 1 : 0.35;
-      for (const l of legs) {
-        const ph = phase * 1.5 + (l.front ? 0 : Math.PI) + (l.sx > 0 ? 0 : Math.PI);
-        l.pivot.rotation.y = Math.sin(ph) * 0.5 * walk * Math.min(1, sp / 2 + 0.15);
-        l.pivot.rotation.z = l.sx * (Math.max(0, Math.cos(ph)) * 0.18 * walk);
+    // `list` holds the interpolated { x, z, yaw } of every crocodile
+    update(list, dt, time) {
+      poses = list; dtNow = dt; timeNow = time;
+      for (const L of levels) { L.nMain = 0; L.nl = 0; }
+      for (let i = 0; i < n; i++) {
+        const c = crocs[i], p = list[i], r = 4.2 * c.size;
+        const dx = p.x - VIEW.x, dz = p.z - VIEW.z, d2 = dx * dx + dz * dz;
+        if (d2 > 320 * 320) { st[i].on = false; continue; }
+        const L = levels[d2 < 70 * 70 ? 0 : 1];
+        if (sphereVisible(p.x, 0, p.z, r)) write(L, L.nMain++, i);
+        else if (inShadowBox(p.x, 0, p.z, r)) L.later[L.nl++] = i;
+        else st[i].on = false;
+      }
+      for (const L of levels) {
+        L.nAll = L.nMain;
+        for (let k = 0; k < L.nl; k++) write(L, L.nAll++, L.later[k]);
+        if (L.nAll > 0) {
+          for (const [a, size] of [[L.mesh.instanceMatrix, 16], [L.anim, 4], [L.leg, 2]]) {
+            a.clearUpdateRanges(); a.addUpdateRange(0, L.nAll * size); a.needsUpdate = true;
+          }
+        }
+        L.mesh.count = L.nMain;
+        L.mesh.visible = L.nAll > 0;
       }
     },
   };

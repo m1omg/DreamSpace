@@ -1,8 +1,9 @@
 // Small procedural sound engine (Web Audio): surf, underwater rumble, wind
 // at speed, splashes, pearl chime, crocodile hiss/growl, heartbeat when hunted.
+// The dreamy pad stays silent until the player finds out it is a dream.
 
 export function createAudio() {
-  let ctx = null, master, dry, lowpass, surf, under, wind, pad, muted = false, beatT = 0;
+  let ctx = null, master, dry, lowpass, surf, under, wind, pad, muted = false, beatT = 0, dreaming = false;
   const A = {
     get ready() { return !!ctx; },
     start() {
@@ -48,7 +49,16 @@ export function createAudio() {
         l.connect(lg2); lg2.connect(g.gain); l.start();
         o.connect(g); g.connect(pf); o.start();
       }
-      pad.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 6);
+      if (dreaming) A.dream();
+    },
+    // the dream is out: let the pad drift in
+    dream() {
+      dreaming = true;
+      if (!ctx) return;
+      const t = ctx.currentTime;
+      pad.gain.cancelScheduledValues(t);
+      pad.gain.setValueAtTime(pad.gain.value, t);
+      pad.gain.linearRampToValueAtTime(0.5, t + 8);
     },
     toggleMute() { muted = !muted; if (master) master.gain.value = muted ? 0 : 0.8; return muted; },
     burst(freq, q, dur, gain, type = 'bandpass', sweep = 1) {

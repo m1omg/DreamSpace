@@ -1,10 +1,13 @@
-// Date palms, mangroves, garden plants and seagrass. Everything is instanced.
+// Date palms, mangroves, garden plants and seagrass. Everything is instanced;
+// the big sets are culled per instance and switch to a simpler model in the
+// distance (see instancing.js).
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { LAYOUT } from '../sim/layout.js';
 import { mulberry32 } from '../sim/noise.js';
 import { patchMaterial, paint, canvasTexture, detailTextures } from './shared.js';
+import { createPool, trs } from './instancing.js';
 
 const M4 = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3(), S = new THREE.Vector3(), E = new THREE.Euler();
 
@@ -89,19 +92,20 @@ function leafCard(size, pos, centre, rnd) {
 }
 
 // ---- date palms --------------------------------------------------------------------
-function palmGeometry(variant) {
+function palmGeometry(variant, lo = false) {
   const rnd = mulberry32(100 + variant * 7);
   const H = 6.4 + variant * 1.4;
   const bend = 0.016 + variant * 0.01;
   // trunk: flared foot, slight taper, a swollen "boot" under the crown
   const profile = [];
-  for (let i = 0; i <= 16; i++) {
-    const t = i / 16;
+  const rows = lo ? 7 : 16;
+  for (let i = 0; i <= rows; i++) {
+    const t = i / rows;
     let r = 0.25 - 0.05 * t + 0.14 * Math.exp(-t * 14) + 0.09 * Math.exp(-((t - 0.97) ** 2) / 0.004);
     r += 0.012 * Math.sin(t * 60);
     profile.push(new THREE.Vector2(r, t * H));
   }
-  const trunk = new THREE.LatheGeometry(profile, 12);
+  const trunk = new THREE.LatheGeometry(profile, lo ? 6 : 12);
   const tp = trunk.attributes.position, tuv = trunk.attributes.uv;
   for (let i = 0; i < tp.count; i++) {
     const y = tp.getY(i);
@@ -116,7 +120,7 @@ function palmGeometry(variant) {
   for (let i = 0; i < n; i++) {
     const ring = i / n;
     const L = 3.3 + rnd() * 1.0, W = 1.2;
-    const g = new THREE.PlaneGeometry(W, L, 2, 8);
+    const g = new THREE.PlaneGeometry(W, L, 2, lo ? 3 : 8);
     const p = g.attributes.position;
     // young fronds stand up in the middle, old ones hang
     const up = 1.15 - ring * 1.75 + (rnd() - 0.5) * 0.25;
@@ -145,26 +149,28 @@ export function createPalms(scene, quality) {
     map: frondTexture(), alphaTest: 0.42, side: THREE.DoubleSide, roughness: 0.55, color: 0xdfeacb,
   }), { sway: 0.3, key: 'palmFrond', vertex: 'transformed.y += sin(uTime*1.9 + position.z*0.9 + position.x*1.3)*0.012*dot(position.xz - vec2(0.0), position.xz)*0.2;' });
   frondMat.alphaToCoverage = quality !== 'low';
-  const group = new THREE.Group();
   for (let v = 0; v < 3; v++) {
     const list = LAYOUT.palms.filter((p) => p.v === v);
     if (!list.length) continue;
-    const g = palmGeometry(v);
-    const t = new THREE.InstancedMesh(g.trunk, trunkMat, list.length);
-    const f = new THREE.InstancedMesh(g.fronds, frondMat, list.length);
-    list.forEach((p, i) => {
-      setInst(t, i, p.x, p.y - 0.15, p.z, p.rot, p.s);
-      setInst(f, i, p.x, p.y - 0.15, p.z, p.rot, p.s);
+    const hi = palmGeometry(v), lo = palmGeometry(v, true);
+    createPool(scene, {
+      name: 'palm' + v, castShadow: true, margin: 1.2,
+      items: list.map((p) => ({ matrix: trs(p.x, p.y - 0.15, p.z, p.rot, p.s) })),
+      levels: [
+        { maxDist: 70, parts: [{ geometry: hi.trunk, material: trunkMat }, { geometry: hi.fronds, material: frondMat }] },
+        { maxDist: 4000, parts: [{ geometry: lo.trunk, material: trunkMat }, { geometry: lo.fronds, material: frondMat }] },
+      ],
     });
-    for (const m of [t, f]) { m.castShadow = true; m.receiveShadow = true; m.computeBoundingSphere(); group.add(m); }
   }
-  scene.add(group);
-  return group;
 }
 
 // ---- mangroves ------------------------------------------------------------------
-function mangroveGeometry(variant) {
+// detail 1 and 2 build the same tree (same random sequence) with far fewer
+// triangles for the distance: coarser tubes, no forked roots, fewer and
+// bigger leaf cards; at 2 also only every other stilt root.
+function mangroveGeometry(variant, detail = 0) {
   const rnd = mulberry32(700 + variant * 13);
+  const lo = detail > 0, far = detail > 1;
   const bark = [], leaves = [];
   const trunkH = 2.4 + rnd() * 0.8;
   const lean = new THREE.Vector3((rnd() - 0.5) * 0.7, 0, (rnd() - 0.5) * 0.7);
@@ -185,7 +191,7 @@ function mangroveGeometry(variant) {
     }
     return g;
   };
-  bark.push(tube(trunkBase, new THREE.Vector3(lean.x * 0.2, 2.2, lean.z * 0.2), trunkTop, 0.19, 0.11, 5, 7));
+  bark.push(tube(trunkBase, new THREE.Vector3(lean.x * 0.2, 2.2, lean.z * 0.2), trunkTop, 0.19, 0.11, far ? 2 : lo ? 3 : 5, far ? 3 : lo ? 4 : 7));
   // stilt roots, some of them forking
   const nRoots = 10 + variant;
   for (let i = 0; i < nRoots; i++) {
@@ -195,8 +201,8 @@ function mangroveGeometry(variant) {
     const start = new THREE.Vector3(Math.cos(a) * 0.08, startY, Math.sin(a) * 0.08);
     const end = new THREE.Vector3(Math.cos(a) * rad, -0.75, Math.sin(a) * rad);
     const ctrl = new THREE.Vector3(Math.cos(a) * rad * 0.95, startY + 0.25, Math.sin(a) * rad * 0.95);
-    bark.push(tube(start, ctrl, end, 0.075, 0.04, 6, 5));
-    if (i % 3 === 0) {
+    if (!far || i % 2 === 0) bark.push(tube(start, ctrl, end, far ? 0.09 : 0.075, 0.04, far ? 2 : lo ? 3 : 6, lo ? 3 : 5));
+    if (i % 3 === 0 && !lo) {
       const mid = new THREE.QuadraticBezierCurve3(start, ctrl, end).getPoint(0.55);
       const a2 = a + 0.5;
       bark.push(tube(mid, new THREE.Vector3(mid.x * 1.25, mid.y * 0.9, mid.z * 1.25), new THREE.Vector3(Math.cos(a2) * rad * 1.15, -0.75, Math.sin(a2) * rad * 1.15), 0.045, 0.03, 4, 4));
@@ -209,12 +215,13 @@ function mangroveGeometry(variant) {
     const r = i === 0 ? 0.2 : 1.1 + rnd() * 0.9;
     const c = new THREE.Vector3(trunkTop.x + Math.cos(a) * r, trunkTop.y + 0.2 + rnd() * 0.9, trunkTop.z + Math.sin(a) * r);
     const from = trunkBase.clone().lerp(trunkTop, 0.55 + rnd() * 0.4);
-    bark.push(tube(from, from.clone().lerp(c, 0.5).add(new THREE.Vector3(0, 0.4, 0)), c, 0.075, 0.035, 4, 5));
+    bark.push(tube(from, from.clone().lerp(c, 0.5).add(new THREE.Vector3(0, 0.4, 0)), c, 0.075, 0.035, far ? 1 : lo ? 2 : 4, lo ? 3 : 5));
     const cr = 1.0 + rnd() * 0.5;
     for (let k = 0; k < 15; k++) {
       const th = rnd() * 6.283, ph = Math.acos(1 - rnd() * 1.5);
       const pos = new THREE.Vector3(c.x + Math.sin(ph) * Math.cos(th) * cr * 0.85, c.y + Math.cos(ph) * cr * 0.6, c.z + Math.sin(ph) * Math.sin(th) * cr * 0.85);
-      leaves.push(leafCard(1.4 + rnd() * 0.7, pos, c, rnd).toNonIndexed());
+      const card = leafCard((1.4 + rnd() * 0.7) * (far ? 2.0 : lo ? 1.55 : 1), pos, c, rnd);
+      if (far ? k % 5 === 0 : !lo || k % 3 === 0) leaves.push(card.toNonIndexed());
     }
   }
   return { bark: mergeGeometries(bark.map((g) => g.toNonIndexed())), leaves: mergeGeometries(leaves) };
@@ -232,35 +239,23 @@ diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.72,0.7,0.62), smoothstep(0.02,0.
     map: leafTexture('mangrove'), alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.45, color: 0xe6f2d8,
   }), { sway: 0.22, key: 'mgLeaf' });
   leafMat.alphaToCoverage = quality !== 'low';
-  const group = new THREE.Group();
-  const geos = [0, 1, 2].map(mangroveGeometry);
-  const CH = 150;
-  const buckets = new Map();
-  for (const m of LAYOUT.mangroves) {
-    const k = m.v + ':' + Math.floor(m.x / CH) + ':' + Math.floor(m.z / 220);
-    if (!buckets.has(k)) buckets.set(k, []);
-    buckets.get(k).push(m);
-  }
-  const tint = new THREE.Color();
-  for (const [k, list] of buckets) {
-    const v = +k.split(':')[0];
-    const b = new THREE.InstancedMesh(geos[v].bark, barkMat, list.length);
-    const l = new THREE.InstancedMesh(geos[v].leaves, leafMat, list.length);
-    list.forEach((m, i) => {
-      setInst(b, i, m.x, m.y, m.z, m.rot, m.s);
-      setInst(l, i, m.x, m.y, m.z, m.rot, m.s);
-      const h = (Math.sin(m.x * 12.9 + m.z * 78.2) * 43758.5) % 1;
-      tint.setHSL(0.27 + 0.05 * h, 0.35, 0.78 + 0.12 * Math.abs(h));
-      l.setColorAt(i, tint);
+  for (let v = 0; v < 3; v++) {
+    const list = LAYOUT.mangroves.filter((m) => m.v === v);
+    if (!list.length) continue;
+    const hi = mangroveGeometry(v), lo = mangroveGeometry(v, 1), far = mangroveGeometry(v, 2);
+    createPool(scene, {
+      name: 'mangrove' + v, castShadow: true, margin: 0.8,
+      items: list.map((m) => {
+        const h = (Math.sin(m.x * 12.9 + m.z * 78.2) * 43758.5) % 1;
+        return { matrix: trs(m.x, m.y, m.z, m.rot, m.s), color: new THREE.Color().setHSL(0.27 + 0.05 * h, 0.35, 0.78 + 0.12 * Math.abs(h)) };
+      }),
+      levels: [
+        { maxDist: 55, parts: [{ geometry: hi.bark, material: barkMat }, { geometry: hi.leaves, material: leafMat, color: true }] },
+        { maxDist: 150, parts: [{ geometry: lo.bark, material: barkMat }, { geometry: lo.leaves, material: leafMat, color: true }] },
+        { maxDist: 4000, parts: [{ geometry: far.bark, material: barkMat }, { geometry: far.leaves, material: leafMat, color: true }] },
+      ],
     });
-    for (const mesh of [b, l]) {
-      mesh.castShadow = true; mesh.receiveShadow = true;
-      mesh.computeBoundingSphere();
-      group.add(mesh);
-    }
   }
-  scene.add(group);
-  return group;
 }
 
 // ---- garden plants: bougainvillea and clipped hedge balls -------------------------------
@@ -315,9 +310,10 @@ export function createSeagrass(scene, quality) {
     swayWater: 0.22, key: 'grass', color: 'diffuseColor.rgb *= 0.55 + 0.9*clamp(vObj.y*2.0, 0.0, 1.0);',
   });
   const list = quality === 'low' ? LAYOUT.seagrass.filter((_, i) => i % 2 === 0) : LAYOUT.seagrass;
-  const mesh = new THREE.InstancedMesh(geo, mat, list.length);
-  list.forEach((s, i) => setInst(mesh, i, s.x, s.y - 0.03, s.z, s.rot, s.s * 1.2));
-  mesh.computeBoundingSphere();
-  scene.add(mesh);
-  return mesh;
+  // ankle-high and under water: invisible beyond a few tens of metres
+  return createPool(scene, {
+    name: 'seagrass', margin: 0.3,
+    items: list.map((s) => ({ matrix: trs(s.x, s.y - 0.03, s.z, s.rot, s.s * 1.2) })),
+    levels: [{ maxDist: quality === 'low' ? 32 : 42, parts: [{ geometry: geo, material: mat }] }],
+  });
 }

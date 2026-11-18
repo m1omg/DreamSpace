@@ -2,24 +2,22 @@
 // Look angles change per input event, never per frame, so turning speed does
 // not depend on the frame rate either.
 
-export const ACTIONS = [
-  ['forward', 'Dopredu'], ['back', 'Dozadu'], ['left', 'Doľava'], ['right', 'Doprava'],
-  ['jump', 'Skok / nahor vo vode'], ['dive', 'Potopiť sa'], ['sprint', 'Šprint / rýchle plávanie'], ['mute', 'Zvuk'],
-];
+import { t, has } from './i18n.js';
+
+// action ids; their labels live in i18n.js under 'act.<id>'
+export const ACTIONS = ['forward', 'back', 'left', 'right', 'jump', 'dive', 'sprint', 'mute'];
 export const DEFAULT_BINDS = {
   forward: ['KeyW', 'ArrowUp'], back: ['KeyS', 'ArrowDown'], left: ['KeyA', 'ArrowLeft'], right: ['KeyD', 'ArrowRight'],
   jump: ['Space', 'Mouse2'], dive: ['KeyC', 'ControlLeft'], sprint: ['ShiftLeft', 'ShiftRight'], mute: ['KeyM', null],
 };
 
+// key names that are the same in every language; the rest come from i18n.js ('key.<code>')
 const NAMES = {
-  Space: 'Medzerník', ShiftLeft: 'Ľ Shift', ShiftRight: 'P Shift', ControlLeft: 'Ľ Ctrl', ControlRight: 'P Ctrl',
-  AltLeft: 'Ľ Alt', AltRight: 'P Alt', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Tab: 'Tab',
-  Enter: 'Enter', Backquote: '`', CapsLock: 'Caps Lock',
-  Mouse0: 'Ľavé tl. myši', Mouse1: 'Koliesko (klik)', Mouse2: 'Pravé tl. myši', Mouse3: 'Myš 4', Mouse4: 'Myš 5',
-  WheelUp: 'Koliesko hore', WheelDown: 'Koliesko dole',
+  ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Tab: 'Tab', Enter: 'Enter', Backquote: '`', CapsLock: 'Caps Lock',
 };
 export function keyName(code) {
   if (!code) return '—';
+  if (has('key.' + code)) return t('key.' + code);
   if (NAMES[code]) return NAMES[code];
   if (code.startsWith('Key')) return code.slice(3);
   if (code.startsWith('Digit')) return code.slice(5);

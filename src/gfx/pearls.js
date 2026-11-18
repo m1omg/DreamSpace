@@ -1,19 +1,40 @@
-// Dream pearls: an open clam with a glowing pearl and a soft beacon of light
-// so they can be spotted from a distance.
+// Pearls: an open clam with a glowing pearl and a soft beacon of light so
+// they can be spotted from a distance. All pearls share four draw calls
+// (shells, pearls, beams, glows) instead of five objects each.
 
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { LAYER_FX, U, patchMaterial } from './shared.js';
 
 export function createPearls(scene, pearls) {
+  const n = pearls.length;
   const shellMat = patchMaterial(new THREE.MeshStandardMaterial({ color: 0xe9d9c4, roughness: 0.4, side: THREE.DoubleSide }), { key: 'clam' });
   const pearlMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xbfe9ff, emissiveIntensity: 2.2, roughness: 0.15 });
+
+  // the two halves of the clam, the upper one hinged open at the back
   const half = new THREE.SphereGeometry(0.34, 14, 7, 0, Math.PI * 2, 0, Math.PI / 2);
   half.scale(1, 0.45, 0.85);
-  const pearlG = new THREE.SphereGeometry(0.13, 16, 12);
+  const lower = half.clone().rotateX(Math.PI);
+  const upper = half.clone().translate(0, 0, 0.28).rotateX(-0.95).translate(0, 0, -0.28);
+  const shellG = mergeGeometries([lower, upper]);
+  const pearlG = new THREE.SphereGeometry(0.13, 16, 12).translate(0, 0.06, 0);
 
   const beamMat = new THREE.ShaderMaterial({
     uniforms: { uTime: U.uTime, uColor: { value: new THREE.Color(0.55, 0.9, 1.0) } },
-    vertexShader: 'varying vec2 vUv; varying vec3 vN; varying vec3 vV; void main(){ vUv = uv; vec4 mv = modelViewMatrix*vec4(position,1.0); vN = normalize(normalMatrix*normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix*mv; }',
+    vertexShader: /* glsl */ `
+varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+void main(){
+  vUv = uv;
+  vec4 p = vec4(position, 1.0);
+  vec3 nrm = normal;
+  #ifdef USE_INSTANCING
+    p = instanceMatrix * p;
+    nrm = mat3(instanceMatrix) * nrm;
+  #endif
+  vec4 mv = modelViewMatrix * p;
+  vN = normalize(normalMatrix * nrm); vV = normalize(-mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`,
     fragmentShader: /* glsl */ `
 uniform float uTime; uniform vec3 uColor; varying vec2 vUv; varying vec3 vN; varying vec3 vV;
 void main(){
@@ -26,58 +47,72 @@ void main(){
   const beamG = new THREE.CylinderGeometry(0.9, 0.18, 16, 14, 1, true);
   beamG.translate(0, 8, 0);
 
-  const glowTex = (() => {
-    const c = document.createElement('canvas'); c.width = c.height = 128;
-    const g = c.getContext('2d');
-    const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
-    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(170,230,255,0.55)'); gr.addColorStop(1, 'rgba(120,200,255,0)');
-    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
-    return new THREE.CanvasTexture(c);
-  })();
-  const glowMat = new THREE.SpriteMaterial({ map: glowTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, color: 0xffffff });
+  const mk = (g, m, fx) => {
+    const im = new THREE.InstancedMesh(g, m, n);
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    im.frustumCulled = false;
+    if (fx) im.layers.set(LAYER_FX);
+    scene.add(im);
+    return im;
+  };
+  const shells = mk(shellG, shellMat, false), pearlMesh = mk(pearlG, pearlMat, false), beams = mk(beamG, beamMat, true);
 
-  const items = pearls.map((p) => {
-    const g = new THREE.Group();
-    g.position.set(p.x, p.y, p.z);
-    const lower = new THREE.Mesh(half, shellMat);
-    lower.rotation.x = Math.PI;
-    const upperPivot = new THREE.Group();
-    upperPivot.position.set(0, 0, -0.28);
-    const upper = new THREE.Mesh(half, shellMat);
-    upper.position.set(0, 0, 0.28);
-    upperPivot.add(upper);
-    upperPivot.rotation.x = -0.95;
-    const pearl = new THREE.Mesh(pearlG, pearlMat);
-    pearl.position.y = 0.06;
-    g.add(lower, upperPivot, pearl);
-    const beam = new THREE.Mesh(beamG, beamMat);
-    beam.layers.set(LAYER_FX);
-    const glow = new THREE.Sprite(glowMat);
-    glow.scale.setScalar(1.7);
-    glow.position.y = 0.1;
-    glow.layers.set(LAYER_FX);
-    g.add(beam, glow);
-    scene.add(g);
-    return { g, pearl, glow, beam, base: p.y, data: p, fade: 1 };
+  // soft glows: one point sprite per pearl
+  const gp = new Float32Array(n * 3), gs = new Float32Array(n);
+  const glowG = new THREE.BufferGeometry();
+  glowG.setAttribute('position', new THREE.BufferAttribute(gp, 3).setUsage(THREE.DynamicDrawUsage));
+  glowG.setAttribute('aSize', new THREE.BufferAttribute(gs, 1).setUsage(THREE.DynamicDrawUsage));
+  const glowMat = new THREE.ShaderMaterial({
+    uniforms: { uScale: { value: 600 } },
+    vertexShader: /* glsl */ `
+uniform float uScale; attribute float aSize;
+void main(){
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = aSize * uScale / max(-mv.z, 0.3);
+}`,
+    fragmentShader: /* glsl */ `
+void main(){
+  float r = length(gl_PointCoord - 0.5) * 2.0;
+  if (r > 1.0) discard;
+  // the old sprite gradient: white core, pale blue halo
+  vec3 c = mix(vec3(1.0), vec3(0.67, 0.9, 1.0), smoothstep(0.0, 0.25, r));
+  float a = mix(1.0, 0.55, smoothstep(0.0, 0.25, r)) * (1.0 - smoothstep(0.25, 1.0, r));
+  gl_FragColor = vec4(c * a, 1.0);
+}`,
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
   });
+  const glows = new THREE.Points(glowG, glowMat);
+  glows.frustumCulled = false;
+  glows.layers.set(LAYER_FX);
+  scene.add(glows);
+
+  const fade = new Float32Array(n).fill(1);
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), P = new THREE.Vector3(), S = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0);
 
   return {
-    update(t, dt) {
-      for (const it of items) {
-        if (it.data.taken) {
-          if (it.fade > 0) {
-            it.fade = Math.max(0, it.fade - dt * 2.5);
-            it.g.scale.setScalar(Math.max(0.001, it.fade));
-            it.g.position.y = it.base + (1 - it.fade) * 1.2;
-            if (it.fade === 0) it.g.visible = false;
-          }
-          continue;
+    // pixelsPerMetre: how many pixels one metre covers at a distance of one metre
+    update(t, dt, pixelsPerMetre) {
+      glowMat.uniforms.uScale.value = pixelsPerMetre;
+      for (let i = 0; i < n; i++) {
+        const d = pearls[i];
+        let y, s, rot;
+        if (d.taken) {
+          // rise and shrink away once collected
+          fade[i] = Math.max(0, fade[i] - dt * 2.5);
+          y = d.y + (1 - fade[i]) * 1.2; s = Math.max(1e-4, fade[i]); rot = t * 0.4 + d.index;
+        } else {
+          fade[i] = 1;
+          y = d.y + Math.sin(t * 1.3 + d.index) * 0.07; s = 1; rot = t * 0.4 + d.index;
         }
-        if (!it.g.visible) { it.g.visible = true; it.fade = 1; it.g.scale.setScalar(1); }
-        it.g.position.y = it.base + Math.sin(t * 1.3 + it.data.index) * 0.07;
-        it.g.rotation.y = t * 0.4 + it.data.index;
-        it.glow.scale.setScalar(1.6 + 0.3 * Math.sin(t * 3 + it.data.index));
+        if (fade[i] <= 0) s = 0;
+        M.compose(P.set(d.x, y, d.z), Q.setFromAxisAngle(Y, rot), S.setScalar(s));
+        shells.setMatrixAt(i, M); pearlMesh.setMatrixAt(i, M); beams.setMatrixAt(i, M);
+        gp[i * 3] = d.x; gp[i * 3 + 1] = y + 0.1 * s; gp[i * 3 + 2] = d.z;
+        gs[i] = s * (1.6 + 0.3 * Math.sin(t * 3 + d.index));
       }
+      shells.instanceMatrix.needsUpdate = true; pearlMesh.instanceMatrix.needsUpdate = true; beams.instanceMatrix.needsUpdate = true;
+      glowG.attributes.position.needsUpdate = true; glowG.attributes.aSize.needsUpdate = true;
     },
   };
 }

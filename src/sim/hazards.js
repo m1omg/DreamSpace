@@ -95,6 +95,6 @@ export function stepHazards(h, p, dt, time, events) {
 }
 
 export function resetHazards(h) {
-  for (const r of h.rays) { r.x = r.hx; r.z = r.hz; r.state = 'rest'; r.t = 0; r.lift = 0; }
+  for (const r of h.rays) { r.x = r.hx; r.z = r.hz; r.state = 'rest'; r.t = 0; r.lift = 0; r.dirty = true; }
   for (const l of h.lions) { l.x = l.hx; l.y = l.hy; l.z = l.hz; l.cool = 0; }
 }

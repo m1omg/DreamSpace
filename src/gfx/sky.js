@@ -39,15 +39,18 @@ function skyMaterial(disc) {
     uniforms: { uSunDir: U.uSunDir, uDisc: { value: disc } },
     vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); vec4 p = projectionMatrix * viewMatrix * vec4(position*7000.0 + cameraPosition, 1.0); gl_Position = p.xyww; }',
     fragmentShader: SKY_FRAG,
-    side: THREE.BackSide, depthWrite: false, fog: false,
+    // drawn after the opaque scene at the far plane: the cloud shader only runs where nothing covers the sky
+    side: THREE.BackSide, depthWrite: false, depthFunc: THREE.LessEqualDepth, fog: false,
   });
 }
+
+const SHADOW_R = 85;
 
 export function createSky(renderer, scene, quality) {
   const geo = new THREE.SphereGeometry(1, 32, 16);
   const sky = new THREE.Mesh(geo, skyMaterial(1));
   sky.frustumCulled = false;
-  sky.renderOrder = -10;
+  sky.renderOrder = 10;
   scene.add(sky);
 
   // Bake the sky (without the sun disc: the directional light already is the
@@ -74,8 +77,7 @@ export function createSky(renderer, scene, quality) {
     sun.castShadow = true;
     sun.shadow.mapSize.set(shadowSize, shadowSize);
     const c = sun.shadow.camera;
-    const R = 85;
-    c.left = -R; c.right = R; c.top = R; c.bottom = -R; c.near = 10; c.far = 420;
+    c.left = -SHADOW_R; c.right = SHADOW_R; c.top = SHADOW_R; c.bottom = -SHADOW_R; c.near = 10; c.far = 420;
     sun.shadow.bias = -0.0004;
     sun.shadow.normalBias = 0.06;
   }
@@ -84,17 +86,29 @@ export function createSky(renderer, scene, quality) {
 
   U.uSunColor.value.set(1.0, 0.93, 0.8);
 
+  // The shadow camera looks down SUN_DIR with the default up vector, so these
+  // are its x and y axes (same construction as Matrix4.lookAt).
+  const LX = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), SUN_DIR).normalize();
+  const LY = new THREE.Vector3().crossVectors(SUN_DIR, LX);
   const tmp = new THREE.Vector3();
+  const view = { x: 0, y: 0, z: 0, ux: LX.x, uy: LX.y, uz: LX.z, vx: LY.x, vy: LY.y, vz: LY.z, R: SHADOW_R };
   return {
     mesh: sky, sun, hemi, cubeTexture: cubeRT.texture,
-    // keep the shadow frustum centred on the player, snapped to shadow texels
+    shadowView: shadowSize ? view : null,
+    // Keep the shadow frustum centred on the player. The centre is snapped to
+    // whole shadow-map texels *in light space*: snapping world x/z instead
+    // shifts the map by fractions of a texel and makes every shadow edge crawl.
     follow(x, y, z) {
       if (!shadowSize) return;
-      const texel = 170 / shadowSize * 2;
-      tmp.set(Math.round(x / texel) * texel, 0, Math.round(z / texel) * texel);
+      const texel = (2 * SHADOW_R) / shadowSize;
+      const u = Math.round((x * LX.x + z * LX.z) / texel) * texel;
+      const v = Math.round((x * LY.x + z * LY.z) / texel) * texel;
+      const w = x * SUN_DIR.x + z * SUN_DIR.z;
+      tmp.set(0, 0, 0).addScaledVector(LX, u).addScaledVector(LY, v).addScaledVector(SUN_DIR, w);
       sun.target.position.copy(tmp);
       sun.position.copy(tmp).addScaledVector(SUN_DIR, 220);
       sun.target.updateMatrixWorld();
+      view.x = tmp.x; view.y = tmp.y; view.z = tmp.z;
     },
   };
 }

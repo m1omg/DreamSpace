@@ -8,7 +8,8 @@
 
 import { createGame, advance, stepGame, STEP } from '../src/sim/game.js';
 import { groundAt, waterLevelAt, terrainHeight, shoreZ, reefD, lagoonMask, channelMask, flatMask } from '../src/sim/terrain.js';
-import { LAYOUT } from '../src/sim/layout.js';
+import { LAYOUT, CORAL_SIZE } from '../src/sim/layout.js';
+import { clamp } from '../src/sim/noise.js';
 import { PC } from '../src/sim/player.js';
 import { CC } from '../src/sim/croc.js';
 
@@ -147,8 +148,88 @@ function flatRun(mode, seconds, pitch = 0) {
   check('wading is slow', wade.maxSp < 3.6, `${wade.maxSp.toFixed(2)} m/s`);
   check('held bunny hop beats crocodile cruise speed', auto.maxSp > CC.SPEED_SHALLOW + 0.5, `${auto.maxSp.toFixed(2)} vs ${CC.SPEED_SHALLOW} m/s`);
   check('timed bunny hops are faster still', perfect.maxSp > auto.maxSp + 2.5, `${perfect.maxSp.toFixed(2)} m/s`);
-  check('fast hops turn into long glides', perfect.best > 18, `${perfect.best.toFixed(1)} m`);
-  check('pulling up in a glide gains real height', climb.height > 4 && climb.height < 16, `${climb.height.toFixed(1)} m`);
+  check('fast hops turn into long flights', perfect.best > 30, `${perfect.best.toFixed(1)} m`);
+  check('looking up in flight gains real height', climb.height > 7 && climb.height < 26, `${climb.height.toFixed(1)} m`);
+}
+// flight: holding jump already floats at hop speed, and nobody stays up for ever
+{
+  const fly = (mode, seconds, pitchAt) => {
+    const g = createGame(), p = g.player;
+    p.x = lane.x; p.z = lane.z; p.feetY = groundAt(p.x, p.z);
+    g.crocs.length = 0; g.hazards.rays.length = 0; g.hazards.lions.length = 0;
+    let cur = 0, longest = 0, last = 0, sum = 0, n = 0;
+    for (let i = 0; i < seconds / STEP; i++) {
+      const t = i * STEP, h = p.feetY - groundAt(p.x, p.z);
+      const inp = { ...inp0(), mz: 1, sprint: true, yaw: Math.PI / 2, jump: true, pitch: pitchAt(t, p) };
+      if (mode === 'timed' && t < 5) inp.jump = !(p.mode === 'air' && p.vy < 0 && h < 0.7 && h > 0.25);
+      stepGame(g, inp);
+      for (const e of g.events) if (e.type === 'hop') { last = cur; longest = Math.max(longest, cur); cur = 0; }
+      g.events.length = 0;
+      if (p.mode === 'air') cur += STEP;
+      if (t > seconds / 2) { sum += Math.hypot(p.vx, p.vz); n++; }
+      // the lane is short: loop back along it, keeping the height above the ground
+      if (p.x < lane.x - 70) { p.x += 66; p.feetY = groundAt(p.x, p.z) + h; }
+    }
+    return { last, longest: Math.max(longest, cur), mean: sum / n, height: p.bestHeight };
+  };
+  const hold = fly('hold', 12, () => 0);
+  check('a held hop floats', hold.last > 1.5 && hold.last < 3.2, `${hold.last.toFixed(2)} s in the air per hop`);
+  check('floating does not cost the lead over a crocodile', hold.mean > CC.SPEED_SHALLOW + 0.3, `${hold.mean.toFixed(2)} vs ${CC.SPEED_SHALLOW} m/s`);
+  const level = fly('timed', 30, (t, p) => (t < 5 ? 0 : clamp(0.12 + (6 - p.height) * 0.08 - p.vy * 0.06, 0, 0.9)));
+  const swoop = fly('timed', 40, (t, p) => { if (t < 5) return 0; if (p.height > 12) p.dive = true; if (p.height < 3.5) p.dive = false; return p.dive ? -0.7 : 0.6; });
+  console.log(`     longest flight: holding level ${level.longest.toFixed(1)} s, swooping ${swoop.longest.toFixed(1)} s (up to ${swoop.height.toFixed(1)} m)`);
+  check('flight always ends: no staying up for ever', level.longest < 12 && swoop.longest < 12, `${Math.max(level.longest, swoop.longest).toFixed(1)} s`);
+  check('swooping reaches real height', swoop.height > 8, `${swoop.height.toFixed(1)} m`);
+}
+
+// --- 3b. coral is solid and stands on the sea bed ----------------------------------
+{
+  let floating = 0, dry = 0;
+  for (const c of LAYOUT.corals) {
+    if (Math.abs(c.y - groundAt(c.x, c.z)) > 1e-6) floating++;
+    if (c.y + CORAL_SIZE[c.t][1] * c.sy > -0.25) dry++;
+  }
+  check('every coral stands on the ground under it', floating === 0 && LAYOUT.corals.length > 1000, `${LAYOUT.corals.length} colonies`);
+  check('no coral grows out of the water', dry === 0);
+  const swimAt = (x, z, eye, tx, tz, seconds, each) => {
+    const g = createGame(), p = g.player;
+    g.crocs.length = 0; g.hazards.rays.length = 0; g.hazards.lions.length = 0;
+    p.x = x; p.z = z; p.mode = 'swim'; p.eyeH = PC.EYE_SWIM; p.feetY = eye - PC.EYE_SWIM;
+    const yaw = Math.atan2(-(tx - x), -(tz - z));
+    for (let i = 0; i < seconds / STEP; i++) { stepGame(g, { ...inp0(), mz: 1, sprint: true, yaw }); g.events.length = 0; each(p); }
+    return p;
+  };
+  // swim straight at a big colony on the reef wall, at half its height
+  const c = LAYOUT.reefCorals.filter((o) => o.y < -3 && o.s > 1 && LAYOUT.corals.includes(o))
+    .sort((a, b) => b.s - a.s)[0];
+  const R = CORAL_SIZE[c.t][0] * c.s, H = CORAL_SIZE[c.t][1] * c.sy;
+  let closest = 99;
+  // approach from the deep side, so the sea bed does not lift the swimmer over it
+  const gx = groundAt(c.x + 1, c.z) - groundAt(c.x - 1, c.z), gz = groundAt(c.x, c.z + 1) - groundAt(c.x, c.z - 1), gl = Math.hypot(gx, gz) || 1;
+  swimAt(c.x - gx / gl * 6, c.z - gz / gl * 6, c.y + H * 0.5 + 0.35, c.x, c.z, 3, (p) => { closest = Math.min(closest, Math.hypot(p.x - c.x, p.z - c.z)); });
+  check('swimming into a coral stops at it', closest > R + PC.RADIUS - 0.02, `closest ${closest.toFixed(2)} m, colony radius ${R.toFixed(2)} m`);
+  // a coral rock is ground: the swimmer is carried over it, never through it
+  const b = LAYOUT.bommies.find((o) => o.y < -3.5);
+  const top = groundAt(b.x, b.z);
+  let through = 0, over = false;
+  const end = swimAt(b.x - b.r - 5, b.z, b.y + 0.6, b.x, b.z, 4.5, (p) => {
+    if (p.feetY + p.eyeH < groundAt(p.x, p.z) + 0.3) through++;
+    if (Math.abs(p.x - b.x) < 0.5) over = true;
+  });
+  check('coral rocks are solid', top > b.y + 1 && through === 0 && over && end.x > b.x + b.r,
+    `rock ${(top - b.y).toFixed(1)} m high, swimmer ends ${(end.x - b.x).toFixed(1)} m past it`);
+  check('crocodiles are not walled in by coral', (() => {
+    // a crocodile sent across a lagoon rim full of coral still gets to the swimmer
+    const g = createGame(), p = g.player, k = g.crocs[0];
+    g.crocs = [k]; g.hazards.rays.length = 0; g.hazards.lions.length = 0;
+    const L0 = { x: 14, z: shoreZ(14) + 332 };
+    p.x = L0.x; p.z = L0.z; p.mode = 'swim'; p.eyeH = PC.EYE_SWIM; p.feetY = -0.4;
+    k.x = k.hx = L0.x - 60; k.z = k.hz = L0.z; k.tx = k.x; k.tz = k.z;
+    k.state = 'chase'; k.t = 0; k.calm = 0; k.stamina = CC.STAMINA;
+    let min = 999;
+    for (let i = 0; i < 20 / STEP; i++) { stepGame(g, inp0()); g.events.length = 0; p.health = 100; min = Math.min(min, Math.hypot(k.x - p.x, k.z - p.z)); }
+    return min;
+  })() < 3);
 }
 
 // --- 4. chase outcomes ------------------------------------------------------------

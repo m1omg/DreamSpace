@@ -1,7 +1,7 @@
 // Analytic terrain + water model. Pure functions of position (and time for
 // waves) so the simulation and the renderer agree exactly.
 
-import { fbm, vnoise, smoothstep, clamp, lerp, mulberry32 } from './noise.js';
+import { fbm, vnoise, hash2, smoothstep, clamp, lerp, mulberry32 } from './noise.js';
 import { POOLS, CROSS_CHANNELS, POCKETS, REEF_EDGE, LAGOONS, GROVE } from './mapdata.js';
 
 // ---- monotone cubic interpolation through control points -----------------
@@ -247,7 +247,50 @@ function roofAt(x, z) {
   return top;
 }
 
-// Walkable ground: terrain, pool basins cut in, roofs on top.
+// ---- coral rocks (bommies): solid, part of the ground ------------------------------
+// Each rock is a lumpy dome with an irregular outline. The same function shapes
+// the mesh that is drawn, so what you see is what you bump into and stand on.
+let BOMMIES = [];
+let BOM_X0 = 1e9, BOM_X1 = -1e9, BOM_Z0 = 1e9, BOM_Z1 = -1e9;
+export function setBommies(list) {
+  BOMMIES = list;
+  for (const b of list) {
+    b.pa = hash2(b.seed, 11) * 6.283; b.pb = hash2(b.seed, 23) * 6.283;
+    b.base = b.y - 0.4;                              // the foot of the rock is buried
+    // tall rocks in deep water, low ones in the shallows: the top stays under water
+    // (deep enough to swim over, with room for the coral growing on it)
+    b.h = Math.max(0.5, Math.min(0.5 * b.r + 0.4, (-1.35 - b.base) / 1.1));
+    b.rmax = b.r * 1.24;
+    BOM_X0 = Math.min(BOM_X0, b.x - b.rmax); BOM_X1 = Math.max(BOM_X1, b.x + b.rmax);
+    BOM_Z0 = Math.min(BOM_Z0, b.z - b.rmax); BOM_Z1 = Math.max(BOM_Z1, b.z + b.rmax);
+  }
+}
+/** Outline radius of rock `b` in direction `a`. */
+export function bommieRadius(b, a) {
+  return b.r * (1 + 0.14 * Math.cos(2 * a + b.pa) + 0.09 * Math.cos(3 * a + b.pb));
+}
+/** Surface height of rock `b` at a point (its buried base level outside the outline). */
+export function bommieSurface(b, x, z) {
+  const dx = x - b.x, dz = z - b.z;
+  const q = Math.hypot(dx, dz) / bommieRadius(b, Math.atan2(dz, dx));
+  if (q >= 1) return b.base;
+  const dome = Math.pow(1 - Math.pow(q, 2.6), 0.55);
+  return b.base + b.h * dome * (0.8 + 0.4 * fbm(x * 0.62 + b.pa, z * 0.62 + b.pb, 2));
+}
+/** Top of the coral rock covering a point, or -1e9 where there is none. */
+export function bommieAt(x, z) {
+  if (x < BOM_X0 || x > BOM_X1 || z < BOM_Z0 || z > BOM_Z1) return -1e9;
+  let top = -1e9;
+  for (const b of BOMMIES) {
+    const dx = x - b.x, dz = z - b.z;
+    if (dx * dx + dz * dz >= b.rmax * b.rmax) continue;
+    const y = bommieSurface(b, x, z);
+    if (y > b.base && y > top) top = y;
+  }
+  return top;
+}
+
+// Walkable ground: terrain, pool basins cut in, roofs and coral rocks on top.
 export function groundAt(x, z) {
   const p = poolAt(x, z);
   if (p) {
@@ -259,6 +302,7 @@ export function groundAt(x, z) {
   }
   const y = terrainHeight(x, z);
   if (z < ROOF_ZMAX) { const r = roofAt(x, z); if (r > y) return r; }
+  if (z > BOM_Z0) { const r = bommieAt(x, z); if (r > y) return r; }
   return y;
 }
 

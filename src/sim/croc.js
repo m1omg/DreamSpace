@@ -182,7 +182,8 @@ export function stepCroc(c, player, dt, time, events) {
   }
   vel.x = Math.sin(c.yaw) * c.speed; vel.z = Math.cos(c.yaw) * c.speed;
   pos.x = c.x + vel.x * dt; pos.z = c.z + vel.z * dt;
-  resolveCollisions(pos, vel, CC.RADIUS, ground);
+  // afloat in deep water, a crocodile passes over coral that stays well below it
+  resolveCollisions(pos, vel, CC.RADIUS, Math.max(ground, surf - 0.45));
   // crocodiles do not climb out onto the resort beach
   const g2 = groundAt(pos.x, pos.z);
   if (g2 > 1.0) { pos.x = c.x; pos.z = c.z; c.speed *= 0.5; }

@@ -48,8 +48,10 @@ Na skok sa dá naviazať aj koliesko myši. Na dotykových zariadeniach: ľavý 
 - Drž skok: po dopade skočíš znova a postupne naberáš rýchlosť.
 - Pusť ho a stlač tesne pred dopadom: perfektný hop bez straty rýchlosti a s väčším zrýchlením.
 - Vo vzduchu funguje air strafe (do strán + otáčanie myšou).
-- Nad cca 8 m/s drž skok vo vzduchu a plachtíš. Pohľad hore ťa zdvihne (za cenu rýchlosti),
-  pohľad dole rýchlosť vráti. Vyletíš nad mangrovy a dá sa pristáť aj na streche.
+- Každý hop v sérii skáče o kúsok vyššie. Nad cca 6,5 m/s drž skok vo vzduchu a letíš: už bežný
+  držaný hop sa vznáša okolo 2 s. Letíš tam, kam sa pozeráš: pohľad hore stúpa (za cenu
+  rýchlosti), pohľad dole za vrcholom oblúka je strmhlavý let, ktorý rýchlosť vráti. Let sa
+  vždy skončí (pod 6,5 m/s vztlak zmizne). Vyletíš nad mangrovy a dá sa pristáť aj na streche.
   (V menu to nie je – hra to prezradí, až keď hráč začne skákať.)
 
 ### Nebezpečenstvá
